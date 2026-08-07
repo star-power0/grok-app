@@ -83,6 +83,51 @@ function normalizeKey(p: string): string {
 }
 
 /**
+ * Upper bound on how many trailing chars we'll strip from a non-existing
+ * candidate path looking for an existing prefix. Covers common CJK tails
+ * like "这是什么" / "解释一下代码" (5–10 chars) with headroom.
+ */
+const MAX_TRAILING_TRIMMED_CHARS = 20;
+
+/**
+ * For a candidate that did not exist as-is, find the longest existing prefix
+ * by trimming trailing chars, and return it plus the trimmed tail.
+ *
+ * Rationale: `BARE_PATH_RE` cannot tell "桌面" (part of a path) from
+ * "这是什么" (trailing question) — both are CJK. Paths that fail the exact
+ * existence check are almost always the latter (bare path glued to prose),
+ * so trimming toward the nearest existing ancestor is a safe recovery.
+ * Returns null when no existing prefix is found within the char budget.
+ */
+async function trimToExistingPrefix(
+  hit: BarePathHit,
+): Promise<{ path: string; tail: string } | null> {
+  const candidates: string[] = [];
+  let p = hit.path;
+  for (let n = 0; n < MAX_TRAILING_TRIMMED_CHARS; n++) {
+    if (p.length <= 3) break; // keep the `C:\` drive prefix
+    p = p.slice(0, -1);
+    candidates.push(p);
+  }
+  if (!candidates.length) return null;
+
+  let entries: { path: string; exists: boolean }[] = [];
+  try {
+    entries = await pathsClassify(candidates);
+  } catch {
+    return null; // Host unavailable — leave prose as-is.
+  }
+  // Candidates are longest-first, so the first existing entry is the answer.
+  for (let i = 0; i < candidates.length; i++) {
+    if (entries[i]?.exists) {
+      const path = candidates[i]!;
+      return { path, tail: hit.path.slice(path.length) };
+    }
+  }
+  return null;
+}
+
+/**
  * Turn bare absolute paths in `text` into `@path` references.
  * Non-Tauri / no candidates / no existing paths → returns input unchanged.
  * Never throws: classification failures leave the text untouched.
@@ -100,20 +145,44 @@ export async function recognizeBarePathsInText(text: string): Promise<string> {
   } catch {
     return t; // Host unavailable — leave prose as-is.
   }
-  const existing = new Set(
-    entries.filter((e) => e.exists).map((e) => normalizeKey(e.path)),
-  );
+  const exists = new Map(entries.map((e) => [normalizeKey(e.path), e.exists]));
+
+  // Recover candidates whose regex match swallowed a trailing CJK tail
+  // (e.g. `D:\a\pic.png这是什么`): trim to the nearest existing prefix and
+  // keep the tail as separate prose, so every downstream @-ref parser
+  // (App `strip_inline_image_at_refs` / CLI `collect_file_references`,
+  // both whitespace-delimited) sees the exact path.
+  const trimmed = new Map<string, { path: string; tail: string }>();
+  for (const hit of hits) {
+    if (exists.get(normalizeKey(hit.path))) continue;
+    const r = await trimToExistingPrefix(hit);
+    if (r) trimmed.set(normalizeKey(hit.path), r);
+  }
 
   // Replace from the end so earlier offsets stay valid.
   let out = t;
   for (const hit of [...hits].reverse()) {
-    if (!existing.has(normalizeKey(hit.path))) continue;
+    const key = normalizeKey(hit.path);
+    const exact = exists.get(key);
+    const rec = exact ? null : trimmed.get(key);
+    if (!exact && !rec) continue;
+    const path = exact ? hit.path : rec!.path;
+    const tail = rec ? rec!.tail : "";
     const before = out.slice(0, hit.index);
     const alreadyRef = before.endsWith("@");
     // Use the quote-stripped path: `"D:\…"` → `@D:\…` (the `@`-ref parser
     // requires the drive letter right after `@`; quotes would break it).
-    const replacement = alreadyRef ? hit.path : `@${hit.path}`;
-    out = before + replacement + out.slice(hit.index + hit.raw.length);
+    const ref = alreadyRef ? path : `@${path}`;
+    // A recovered CJK tail gets a leading space so it reads as normal prose
+    // instead of extending the @-ref.
+    const tailTxt = tail && !alreadyRef ? ` ${tail}` : "";
+    // If original text glues non-whitespace right after the match (e.g.
+    // `"D:\a\b.txt"识别一下` or `C:\x.png，这是啥`), insert a space so the
+    // whitespace-delimited @-ref parsers (App / CLI) still see the exact
+    // path instead of swallowing the glued punctuation/prose.
+    const after = out.slice(hit.index + hit.raw.length);
+    const sep = tailTxt ? "" : after.length > 0 && !/^\s/.test(after) ? " " : "";
+    out = before + ref + tailTxt + sep + after;
   }
   return out;
 }

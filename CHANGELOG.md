@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   内容块、文件夹/文档走 CLI 工具读取，对齐 Goose `detect_image_path` / Claude Code @-mentions。
   仅验证存在的路径才转换（`paths_classify`），`C:盘`、时间 `3:30`、URL 等不误伤；
   已带 `@` 的引用不重复加。发送主路径 / 排队引导 / 编辑重发三处接入。
+  - 08-07 增强：裸路径后紧跟中文提问（`D:\a\pic.png这是什么？`）时，正则会把中文吞进
+    路径导致存在性校验失败。现对未命中候选做**存在性前缀修剪**（取最近存在的真实路径）
+    并在转换时**用空格隔开尾巴**（`@D:\a\pic.png 这是什么？`），使下游各段 @-ref 解析
+    （App `strip_inline_image_at_refs` / CLI `collect_file_references`，均按空白截断）
+    都能拿到精确路径；带引号路径后贴中文、裸路径后贴标点同样隔开。
 
 ### Changed
 - **读图（核心修复）**：多模态主模型发消息时，图片不再只以 `@path` 文本传给 CLI（CLI 只从 ACP
@@ -38,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - 队列消息回复丢失：任务进行中发送的排队消息，模型回复此前不可见（需切换对话或重启才显示）；
   现可实时流式显示。
+- **切换模型对话崩溃（400 `AGENT_CRASHED`）**：CLI `read_file` 读图把图片 base64 放进 tool
+  result 的图片内容块，而 OpenAI chat_completions / Responses 的 tool message 只接受文本内容，
+  严格中转（klapi）直接 400，会话重放一并失败。现在这两个后端的 tool result 图片降级为文本
+  摘要（像素仍走用户消息多模态 `@path` 路径），Anthropic messages 后端保留图片块不变
+  （`chat_completions.rs` / `responses.rs`）。
 - （流式）CLI 对中转 502 的指数退避（2s→30s 封顶）与 App 重试 chip 保持现状；TTFT 与中转
   网络抖动属于上游，另见迭代文档第七节建议。
 
@@ -45,7 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 端到端图片链路通过：App 新格式图片内容块 → CLI（`shell.image_budget inline_images:1`）→
   pulseaify(gpt-5.6-terra) → 模型读出测试图 "HELLO 12345"（`A:\ClaudeWorkspace\.tmp\acp_image_wire_test.py`）。
 - 新 GUI 已部署 `E:\GrokApp\Grok.exe`（27,448,832 B，旧版备份
-  `Grok.exe.bak-0807-20260807-084127`），启动健康。
+  `Grok.exe.bak-20260807-143233`），启动健康。
+- CLI conversation 模块测试 211/211 通过（含 tool result 图片降级与 Anthropic 保留图片的断言）。
 - 队列修复（prompt_complete 回落 pin + 重放守卫）为代码级验证，待 GUI 实操复核。
 
 ## [0.2.5] - 2026-08-04
