@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   配置拉取（`/v1/models`）新增模型默认继承站点默认，可逐行覆盖。en / zh / zh-TW 三语文案。
 - 预设更新：DeepSeek / OpenCode Go 预设模型默认 `supportsVision: false`（其 chat_completions
   不支持图片，避免 400）。
+- **粘贴裸路径识别**（`src/lib/barePathRecognize.ts`）：用户粘贴/输入的 Windows 绝对路径
+  （`"D:\…"` 带引号 / `D:\…` 裸路径 / `D:/…`）自动识别为 `@path` 引用——图片走多模态
+  内容块、文件夹/文档走 CLI 工具读取，对齐 Goose `detect_image_path` / Claude Code @-mentions。
+  仅验证存在的路径才转换（`paths_classify`），`C:盘`、时间 `3:30`、URL 等不误伤；
+  已带 `@` 的引用不重复加。发送主路径 / 排队引导 / 编辑重发三处接入。
 
 ### Changed
 - **读图（核心修复）**：多模态主模型发消息时，图片不再只以 `@path` 文本传给 CLI（CLI 只从 ACP

@@ -518,6 +518,7 @@ import {
   mergeAttachments,
   type Attachment
 } from "@/lib/attachments";
+import { recognizeBarePathsInText } from "@/lib/barePathRecognize";
 import { mapStoredMessagesToChat } from "@/lib/mapStoredMessages";
 import {
   detectAtQueryFromEditor,
@@ -6786,7 +6787,13 @@ export function AppWorkbench() {
       isViewingSendTarget(originView, currentViewFocus(), sendTargetId);
 
     const agentBody = serializeForAgent(segments, { goalMode: useGoal });
-    let agentText = buildAgentPrompt(agentBody, att);
+    // Recognize bare pasted paths (`"D:\…"` / `D:\…`) → `@path` references so
+    // images reach the multimodal block path and folders/docs reach the model's
+    // file tools, matching Claude Code / Goose paste-to-reference behavior.
+    const recognizedBody = await recognizeBarePathsInText(agentBody).catch(
+      () => agentBody,
+    );
+    let agentText = buildAgentPrompt(recognizedBody, att);
     const schemaForSend = sessionJsonSchemaRef.current?.trim() || "";
     if (schemaForSend && isActiveJsonSchema(schemaForSend)) {
       agentText = wrapAgentTextWithJsonSchema(agentText, schemaForSend);
@@ -9270,7 +9277,10 @@ export function AppWorkbench() {
       }
       const segments = parseStoredContent(item.storedDisplay);
       const agentBody = serializeForAgent(segments, { goalMode: item.goalMode });
-      let agentText = buildAgentPrompt(agentBody, item.attachments);
+      let agentText = buildAgentPrompt(
+        await recognizeBarePathsInText(agentBody).catch(() => agentBody),
+        item.attachments,
+      );
       const schemaForGuide = sessionJsonSchemaRef.current?.trim() || "";
       if (schemaForGuide && isActiveJsonSchema(schemaForGuide)) {
         agentText = wrapAgentTextWithJsonSchema(agentText, schemaForGuide);
@@ -14292,7 +14302,10 @@ export function AppWorkbench() {
       if (isDraftEmpty(segments) && !att.length) return;
 
       const agentBody = serializeForAgent(segments, { goalMode });
-      let agentText = buildAgentPrompt(agentBody, att);
+      let agentText = buildAgentPrompt(
+        await recognizeBarePathsInText(agentBody).catch(() => agentBody),
+        att,
+      );
       const schemaForEdit = sessionJsonSchemaRef.current?.trim() || "";
       if (schemaForEdit && isActiveJsonSchema(schemaForEdit)) {
         agentText = wrapAgentTextWithJsonSchema(agentText, schemaForEdit);
