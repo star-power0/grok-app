@@ -218,12 +218,15 @@ impl SessionManager {
             if let Some(live) = self.unpark_to_live(&meta.id) {
                 // Refresh prefs on shell (model may have changed in UI).
                 let mut live = live;
-                live.model_id = Some(prefs.model_id.clone());
+                // model_id must mirror the CLI's effective model (agent_spawn_model_id),
+                // not the raw composer prefs id, so Host vision gates follow the model
+                // actually used in the conversation (see main_is_text_only_for).
+                live.model_id = Some(agent_model.clone());
                 live.effort = Some(prefs.effort.clone());
                 live.product_mode = Some(prefs.mode.clone());
                 live.policy = policy;
                 live.project_path = project_path.clone();
-                live.meta.model_id = Some(prefs.model_id.clone());
+                live.meta.model_id = Some(agent_model.clone());
                 live.meta.mode = Some(prefs.mode.clone());
                 live.meta.effort = Some(prefs.effort.clone());
                 live.meta.permission_policy = Some(prefs.permission_policy.clone());
@@ -330,7 +333,8 @@ impl SessionManager {
                 stream_thought: String::new(),
                 stream_last_was_assistant: false,
                 stream_attachments: Vec::new(),
-                model_id: Some(prefs.model_id.clone()),
+                model_id: Some(agent_model.clone()),
+                pending_model: None,
                 effort: Some(prefs.effort.clone()),
                 product_mode: Some(prefs.mode.clone()),
                 project_path: project_path.clone(),
@@ -572,11 +576,11 @@ impl SessionManager {
                         s.process_id = process_id;
                         s.meta.agent_session_id = Some(agent_sid);
                         s.meta.fork_agent_session = false;
-                        s.meta.model_id = Some(prefs.model_id.clone());
+                        s.meta.model_id = Some(agent_model.clone());
                         s.meta.mode = Some(prefs.mode.clone());
                         s.meta.effort = Some(prefs.effort.clone());
                         s.meta.permission_policy = Some(prefs.permission_policy.clone());
-                        s.model_id = Some(prefs.model_id.clone());
+                        s.model_id = Some(agent_model.clone());
                         s.effort = Some(prefs.effort.clone());
                         s.product_mode = Some(prefs.mode.clone());
                         s.backend = "grok_agent_stdio".into();
@@ -692,6 +696,7 @@ impl SessionManager {
             stream_last_was_assistant: false,
             stream_attachments: Vec::new(),
             model_id: p.model_id,
+            pending_model: None,
             effort: p.effort,
             product_mode: p.product_mode,
             project_path: p.project_path,
@@ -859,6 +864,7 @@ mod connect_preserve_tests {
             stream_last_was_assistant: false,
             stream_attachments: Vec::new(),
             model_id: None,
+            pending_model: None,
             effort: None,
             product_mode: None,
             project_path: Some("/tmp".into()),

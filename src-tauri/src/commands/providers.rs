@@ -98,8 +98,21 @@ pub async fn providers_activate(
     .await
     .map_err(|e| e.to_string())??;
 
-    // Parked processes keep old GROK_HOME auth/config in memory — kill them.
-    mgr.recycle_all_agents(&app, "provider_route").await;
+    // Custom→custom switches only change `[models].default`; every custom
+    // section was already read into the agent at spawn, so rebind live via
+    // session/set_model instead of killing the warm process and reconnecting.
+    // Fall back to recycle when the target section is missing/edited (upsert)
+    // or the live rebind fails.
+    let mut live_rebound = false;
+    if result.active_source == "custom" {
+        let settings = store::load_settings();
+        if let Some(model_id) = settings.model_id.filter(|m| !m.trim().is_empty()) {
+            live_rebound = mgr.set_model(model_id).await.is_ok();
+        }
+    }
+    if !live_rebound {
+        mgr.recycle_all_agents(&app, "provider_route").await;
+    }
     Ok(result)
 }
 

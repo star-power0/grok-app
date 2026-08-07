@@ -1126,10 +1126,12 @@ pub fn upsert_custom_provider(input: UpsertProviderInput) -> Result<ProvidersLis
             .and_then(|s| s.fields.get("supports_vision"))
             .map(|v| v.trim().eq_ignore_ascii_case("true"))
     });
-    let supports_vision = active_model_vision.or(channel_default);
-    if let Some(sv) = supports_vision {
-        fields.push(("supports_vision".into(), sv.to_string()));
-    }
+    // Always write an explicit flag: a model with no per-model marker and no
+    // channel default is treated as text-only (conservative), so the CLI never
+    // falls back to its optimistic default-true vision gate and tries to inline
+    // image_url on an endpoint that rejects it (400).
+    let supports_vision = active_model_vision.or(channel_default).unwrap_or(false);
+    fields.push(("supports_vision".into(), supports_vision.to_string()));
     if let Some(up) = app_upstream {
         fields.push((
             crate::relay_stream_proxy::APP_UPSTREAM_BASE_URL_KEY.into(),

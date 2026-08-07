@@ -352,6 +352,7 @@ impl SessionManager {
             stream_last_was_assistant: false,
             stream_attachments: Vec::new(),
             model_id: parked.model_id,
+            pending_model: None,
             effort: parked.effort,
             product_mode: parked.product_mode,
             project_path: parked.project_path,

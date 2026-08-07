@@ -178,6 +178,9 @@ pub(crate) struct LiveSession {
     /// Image/file paths produced this turn (image_gen / image_edit).
     pub(super) stream_attachments: Vec<MessageAttachmentStored>,
     pub(super) model_id: Option<String>,
+    /// Model switch requested while a turn was in flight; applied before the
+    /// next prompt so the picker never has to block on a busy agent.
+    pub(super) pending_model: Option<String>,
     /// Effort applied to the live agent process (from last spawn).
     pub(super) effort: Option<String>,
     /// Product mode: agent | plan | ask (ACP session/set_mode).

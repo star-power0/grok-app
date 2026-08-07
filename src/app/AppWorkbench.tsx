@@ -10610,6 +10610,16 @@ export function AppWorkbench() {
             showToast(tr("prov.err.unknownProvider"), 4000);
             return;
           }
+          // Activate first when switching channels: the CLI already knows every
+          // custom section from spawn, so this rebinds live via session/set_model
+          // (no reconnect). The upsert below then recycles only if the newly
+          // active provider's request model changed and must be re-read by the CLI.
+          if (
+            providerActiveSource !== "custom" ||
+            providerActiveId !== pick.providerId
+          ) {
+            await api.providersActivate("custom", pick.providerId);
+          }
           // Switch request model on the channel when needed (keeps multi-model catalog).
           if (provider.model.trim() !== pick.modelId.trim()) {
             const models =
@@ -10638,12 +10648,6 @@ export function AppWorkbench() {
               setAsDefault: false,
               supportsVision: pickedVision,
             });
-          }
-          if (
-            providerActiveSource !== "custom" ||
-            providerActiveId !== pick.providerId
-          ) {
-            await api.providersActivate("custom", pick.providerId);
           }
           await refreshProviderRoute();
           // Map effort into the picked channel's catalog (Grok ↔ DeepSeek tiers).
@@ -10825,6 +10829,9 @@ export function AppWorkbench() {
         const id = sid || liveHostRef.current.sessionId;
         if (id) {
           timeoutSettledSessionId = id;
+          // The pending sessionSend promise may still be awaiting a wedged
+          // agent; release the queue gate so follow-up messages can proceed.
+          sendInFlightRef.current = false;
           settleStoppedSessionUi(id);
           patchSessionMessages(id, (prev) =>
             applyTurnMarker(prev, {
@@ -10846,6 +10853,7 @@ export function AppWorkbench() {
     }, STOP_LATCH_MS + 50);
     try {
       await api.sessionStop(sid);
+      sendInFlightRef.current = false;
       setRetryStatus(null);
       setStreamStall(null);
       setTurnStartedAt(null);

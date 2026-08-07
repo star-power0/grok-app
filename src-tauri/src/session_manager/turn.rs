@@ -375,6 +375,16 @@ impl SessionManager {
             self.emit_for_session(&app, &app_sid);
             return Err("ACP client missing".into());
         };
+        // A model switch requested while the previous turn was busy is applied
+        // here, before this prompt, so the picker never blocks on a retrying agent.
+        let pending_model = self
+            .with_session_mut(&app_sid, |s| s.pending_model.take())
+            .flatten();
+        if let Some(pending) = pending_model {
+            if let Err(e) = acp.set_model(&pending).await {
+                tracing::warn!("apply pending model {pending} before send failed: {e}");
+            }
+        }
         let mgr = Arc::clone(self);
         let app2 = app.clone();
         let turn_sid = app_sid.clone();

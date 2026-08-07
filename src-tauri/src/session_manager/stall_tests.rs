@@ -81,6 +81,7 @@ fn streaming_session(now: Instant, mut patch: impl FnMut(&mut LiveSession)) -> L
         stream_last_was_assistant: false,
         stream_attachments: Vec::new(),
         model_id: None,
+        pending_model: None,
         effort: None,
         product_mode: None,
         project_path: Some("/tmp".into()),

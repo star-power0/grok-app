@@ -51,6 +51,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - （流式）CLI 对中转 502 的指数退避（2s→30s 封顶）与 App 重试 chip 保持现状；TTFT 与中转
   网络抖动属于上游，另见迭代文档第七节建议。
 
+### 08-07 第二轮（切换模型卡顿 / 暂停后不回 / 疑似进程崩溃）
+- **自定义渠道间切换模型不再强杀 agent**：`providers_activate` 对 custom→custom 的切换改为
+  落盘 `[models].default` 后直接对 live agent 发 `session/set_model`（`mgr.set_model`），
+  只有目标段缺失/编辑过或 rebind 失败才回退 `recycle_all_agents`。此前每次点模型都串行
+  `providersUpsert` + `providersActivate` 两次 kill + 重连，是「点击半天没反应 / 状态要重连 /
+  界面抖动」的直接来源。
+- **忙碌时不阻塞模型切换**：`set_model` 检测到 agent 正在 stream/重试时只记录
+  `pending_model` 并立即返回；下一次发消息前先把新模型 `session/set_model` 应用再发
+  prompt。上游 502 长达 40 秒的重试窗口不再让模型选择按钮假死。
+- **暂停兜底**：前端 Stop 的强制完成与正常完成路径都会清 `sendInFlightRef`，避免旧
+  `sessionSend` 卡住时发送队列一直拒发。
+- 运行时日志发现 08-07 08:07–08:12 出现过 Windows `10055`（套接字/动态端口耗尽）：
+  App 媒体服务、中继代理与 tavily/firecrawl/github 三个远程 MCP worker 全部 connect/bind
+  失败，随后 agent 流 EOF。减少模型切换的 agent 重建能显著降低该类瞬时资源耗尽概率；
+  系统级缓解见迭代文档（netsh 扩大动态端口 / 及时重启）。
+
 ### 验证（2026-08-07）
 - 端到端图片链路通过：App 新格式图片内容块 → CLI（`shell.image_budget inline_images:1`）→
   pulseaify(gpt-5.6-terra) → 模型读出测试图 "HELLO 12345"（`A:\ClaudeWorkspace\.tmp\acp_image_wire_test.py`）。
@@ -58,6 +74,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Grok.exe.bak-20260807-143233`），启动健康。
 - CLI conversation 模块测试 211/211 通过（含 tool result 图片降级与 Anthropic 保留图片的断言）。
 - 队列修复（prompt_complete 回落 pin + 重放守卫）为代码级验证，待 GUI 实操复核。
+
+### 08-07 第二轮验证（模型切换 / 暂停后重发）
+- `cargo check --features tauri/custom-protocol` 通过；新 GUI 已部署
+  `E:\GrokApp\Grok.exe`（27,460,096 B，前端指纹 `index-CCrDopD9.js`）。
+- WebView2 CDP 驱动真实 GUI：
+  - 忙碌中切到 Flux：日志无 `recycle_all_agents`、无阻塞 RPC，界面立即显示
+    `deepseek-v4-flash`；下一条消息前先 `session/set_model` 再 `session/prompt`。
+  - 503 重试中点停止：旧 prompt 以 `stop=cancelled` 结束，4 秒后新 prompt 正常发出。
+- 遗留：自定义渠道切换同时改请求模型仍需一次 recycle（CLI `setModel` 不重读
+  config.toml），纯渠道切换与忙碌切换已不重连、不阻塞；详细见
+  `E:\GrokBuild\ITERATION-2026-08-07-model-switch-ux.md`。
 
 ## [0.2.5] - 2026-08-04
 

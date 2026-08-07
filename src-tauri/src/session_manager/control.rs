@@ -286,17 +286,29 @@ impl SessionManager {
         }
         // Store composer preference; agent receives channel-resolved id.
         let agent_model = crate::providers::agent_spawn_model_id(&model_id);
-        let acp = {
+        let (acp, busy) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 s.model_id = Some(model_id.clone());
                 s.meta.model_id = Some(model_id.clone());
                 let _ = store::update_session_meta(&s.meta);
-                s.acp.clone()
+                // A retrying agent can hold its RPC queue for tens of seconds.
+                // Defer the live switch to the next prompt instead of making the
+                // model picker (and every caller) block behind that retry loop.
+                let busy = s.prompt_in_flight
+                    || s.fsm.state() == SessionState::Streaming
+                    || s.fsm.state() == SessionState::AwaitingPermission;
+                if busy {
+                    s.pending_model = Some(agent_model.clone());
+                }
+                (s.acp.clone(), busy)
             } else {
-                None
+                (None, false)
             }
         };
+        if busy {
+            return Ok(());
+        }
         if let Some(acp) = acp {
             acp.set_model(&agent_model).await?;
         }
