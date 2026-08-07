@@ -43,3 +43,4 @@ src-tauri/tauri.release.conf.json
 
 # Custom toolchain / experiment config
 src-tauri/.cargo
+tsconfig.tsbuildinfo
