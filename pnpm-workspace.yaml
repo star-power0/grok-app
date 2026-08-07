@@ -1,0 +1,24 @@
+# Single-package app workspace (required by pnpm when this file exists).
+packages:
+  - "."
+
+# pnpm 11: explicit allowlist for packages that may run postinstall scripts.
+allowBuilds:
+  "@swc/core": true
+  esbuild: true
+  canvas: true
+  core-js: true
+  lightningcss: true
+  "@tauri-apps/cli": true
+  "@tailwindcss/oxide": true
+  unrs-resolver: true
+
+onlyBuiltDependencies:
+  - esbuild
+  - canvas
+  - "@swc/core"
+  - core-js
+  - lightningcss
+  - "@tauri-apps/cli"
+  - "@tailwindcss/oxide"
+  - unrs-resolver
