@@ -189,9 +189,17 @@ fn empty_run_skips_ask_mode_and_tool_turns() {
 #[test]
 fn session_load_replay_gate_matches_prompt_in_flight() {
     // session/load replay: no prompt RPC → drop stream/tool/plan side effects.
-    assert!(SessionManager::is_session_load_replay(false));
+    let replay = sample_live_for_empty_run("", "", 0, "agent");
+    assert!(SessionManager::is_session_load_replay(&replay));
     // Live turn (prompt in flight): apply all side effects.
-    assert!(!SessionManager::is_session_load_replay(true));
+    let live = streaming_session_for_replay_test();
+    assert!(!SessionManager::is_session_load_replay(&live));
+}
+
+fn streaming_session_for_replay_test() -> LiveSession {
+    let mut s = sample_live_for_empty_run("", "", 0, "agent");
+    s.prompt_in_flight = true;
+    s
 }
 
 #[test]

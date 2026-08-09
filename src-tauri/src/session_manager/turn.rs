@@ -15,6 +15,19 @@ use crate::store::{self, ChatMessageStored, MessageAttachmentStored};
 
 use super::*;
 
+/// If the ACP event pump is wedged when `session/prompt` resolves, its
+/// PromptComplete event may never be handled and the chat stays streaming
+/// forever. This fallback polls until the turn closes or the stream has been
+/// quiet long enough to force-close it directly.
+const AUTHORITATIVE_TURN_CLOSE_POLL_SECS: u64 = 5;
+const AUTHORITATIVE_TURN_CLOSE_QUIET_SECS: u64 = 5;
+const AUTHORITATIVE_TURN_CLOSE_MAX_POLLS: u32 = 12;
+
+fn is_manual_compact_command(text: &str) -> bool {
+    text.strip_prefix("/compact")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 impl SessionManager {
     pub async fn send_message(
         self: &Arc<Self>,
@@ -28,6 +41,7 @@ impl SessionManager {
         if text.is_empty() {
             return Err("empty message".into());
         }
+        let is_manual_compact = is_manual_compact_command(&text);
         // Journal stores UI form when provided (skill chips); agent still receives `text`.
         let mut journal_content = display_text
             .map(|s| s.trim().to_string())
@@ -179,10 +193,8 @@ impl SessionManager {
         // ── Host vision (custom text-only main + @image only) ──────────────
         // Official Grok route: never Host-describe (native multimodal).
         // X/web: tools-first via official-aux MCP — no Host keyword pre-search.
-        let host_vision = crate::models_aux::host_vision_will_run(
-            &agent_prompt,
-            session_model_id.as_deref(),
-        );
+        let host_vision =
+            crate::models_aux::host_vision_will_run(&agent_prompt, session_model_id.as_deref());
         let host_tool_id = if host_vision {
             let id = format!("host-vision-{}", Uuid::new_v4());
             let (title, detail_run) = if zh {
@@ -258,8 +270,7 @@ impl SessionManager {
         // reads pixels from ACP image content blocks, so split the refs out and
         // ship the files as base64 blocks (Host vision already stripped images
         // for text-only mains, so this is a no-op there).
-        let (prompt_text, prompt_images) =
-            crate::models_aux::split_prompt_images(&agent_prompt);
+        let (prompt_text, prompt_images) = crate::models_aux::split_prompt_images(&agent_prompt);
         if let Some((id, title)) = host_tool_id {
             let status = if prep.ok { "completed" } else { "failed" };
             // Keep full description in detail for expand / journal (not "识别完成").
@@ -388,41 +399,77 @@ impl SessionManager {
         let mgr = Arc::clone(self);
         let app2 = app.clone();
         let turn_sid = app_sid.clone();
+        if is_manual_compact {
+            self.manual_compact_pending.lock().insert(app_sid.clone());
+        }
         tokio::spawn(async move {
             let outcome = if prompt_images.is_empty() {
                 acp.prompt(&prompt_text).await
             } else {
                 acp.prompt_with_images(&prompt_text, &prompt_images).await
             };
-            if let Err(e) = outcome {
-                // Route by session id: this chat may have been demoted to
-                // background while the prompt ran, and the live slot now holds
-                // someone else's turn — recording the error there would blame
-                // the wrong chat.
-                let mut record_error = false;
-                mgr.with_session_mut(&turn_sid, |s| {
-                    // The RPC failed, so no authoritative PromptComplete will
-                    // arrive. Release the turn or the chat stays un-parkable
-                    // and refuses further sends.
-                    s.prompt_in_flight = false;
-                    // Stall heal / user stop already force-ended (Ready) with
-                    // journal kept — do not clobber with fail_with when
-                    // cancel/abort unblocks this waiter.
-                    if !matches!(
-                        s.fsm.state(),
-                        SessionState::Streaming | SessionState::AwaitingPermission
-                    ) {
-                        return;
+            match outcome {
+                Ok(stop_reason) => {
+                    // The CLI completes `/compact` through x.ai/compact_conversation
+                    // and normally sends no session/update marker. Synthesize the
+                    // identical Host event only if a real compact update did not win.
+                    if is_manual_compact && mgr.manual_compact_pending.lock().remove(&turn_sid) {
+                        SessionManager::emit_context_compact(
+                            &app2,
+                            &turn_sid,
+                            "manual".into(),
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
                     }
-                    // Skip if host already recorded a retry-exhausted error this turn.
-                    if !s.provider_retry_aborted {
-                        SessionManager::record_turn_error(s, &app2, &e);
-                        let _ = s.fsm.fail_with(e);
-                        record_error = true;
+                    // The authoritative RPC result landed. The event pump should
+                    // deliver PromptComplete; if it is wedged (focus/connect churn
+                    // mid-turn), close the turn directly so the UI cannot stay
+                    // streaming and the send queue unblocks.
+                    let mgr_fb = Arc::clone(&mgr);
+                    let app_fb = app2.clone();
+                    let sid_fb = turn_sid.clone();
+                    tokio::spawn(async move {
+                        mgr_fb
+                            .close_turn_after_rpc(&app_fb, &sid_fb, &stop_reason)
+                            .await;
+                    });
+                }
+                Err(e) => {
+                    if is_manual_compact {
+                        mgr.manual_compact_pending.lock().remove(&turn_sid);
                     }
-                });
-                if record_error {
-                    mgr.emit_for_session(&app2, &turn_sid);
+                    // Route by session id: this chat may have been demoted to
+                    // background while the prompt ran, and the live slot now holds
+                    // someone else's turn — recording the error there would blame
+                    // the wrong chat.
+                    let mut record_error = false;
+                    mgr.with_session_mut(&turn_sid, |s| {
+                        // The RPC failed, so no authoritative PromptComplete will
+                        // arrive. Release the turn or the chat stays un-parkable
+                        // and refuses further sends.
+                        s.prompt_in_flight = false;
+                        // Stall heal / user stop already force-ended (Ready) with
+                        // journal kept — do not clobber with fail_with when
+                        // cancel/abort unblocks this waiter.
+                        if !matches!(
+                            s.fsm.state(),
+                            SessionState::Streaming | SessionState::AwaitingPermission
+                        ) {
+                            return;
+                        }
+                        // Skip if host already recorded a retry-exhausted error this turn.
+                        if !s.provider_retry_aborted {
+                            SessionManager::record_turn_error(s, &app2, &e);
+                            let _ = s.fsm.fail_with(e);
+                            record_error = true;
+                        }
+                    });
+                    if record_error {
+                        mgr.emit_for_session(&app2, &turn_sid);
+                    }
                 }
             }
         });
@@ -623,5 +670,67 @@ impl SessionManager {
         self.promote_background_ready_to_parked(&target);
         self.emit_for_session(&app, &target);
         Ok(self.snapshot())
+    }
+
+    /// Safety net for a wedged event pump: the `session/prompt` RPC resolved,
+    /// so the turn is authoritatively done. If the pump never delivered
+    /// PromptComplete (seen when focus churn/connect races block the event
+    /// task), close the turn directly so the UI cannot stay streaming and the
+    /// send queue unblocks.
+    pub(super) async fn close_turn_after_rpc(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        app_session_id: &str,
+        stop_reason: &str,
+    ) {
+        for _ in 0..AUTHORITATIVE_TURN_CLOSE_MAX_POLLS {
+            let (finished, should_close) = self
+                .with_session_mut(app_session_id, |s| {
+                    if !s.prompt_in_flight {
+                        return (true, false);
+                    }
+                    let quiet = s.last_stream_progress.elapsed()
+                        >= Duration::from_secs(AUTHORITATIVE_TURN_CLOSE_QUIET_SECS);
+                    (false, quiet)
+                })
+                .unwrap_or((true, false));
+            if finished {
+                return;
+            }
+            if should_close {
+                let done = self
+                    .with_session_mut(app_session_id, |s| {
+                        tracing::warn!(
+                            target: "session",
+                            session = %app_session_id,
+                            stop = stop_reason,
+                            "authoritative turn close fallback fired (event pump did not close turn)"
+                        );
+                        Self::maybe_flush_stream_journal(s, true, false);
+                        s.prompt_in_flight = false;
+                        s.deferred_prompt_complete = Some(stop_reason.to_string());
+                        Self::try_finish_deferred_prompt_complete(s, Some(app)).is_some()
+                    })
+                    .unwrap_or(false);
+                if done {
+                    self.emit_for_session(app, app_session_id);
+                }
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(AUTHORITATIVE_TURN_CLOSE_POLL_SECS)).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_manual_compact_command;
+
+    #[test]
+    fn recognizes_only_manual_compact_commands() {
+        assert!(is_manual_compact_command("/compact"));
+        assert!(is_manual_compact_command("/compact keep API decisions"));
+        assert!(!is_manual_compact_command("/compact-mode"));
+        assert!(!is_manual_compact_command("please /compact"));
     }
 }

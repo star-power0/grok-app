@@ -2809,12 +2809,13 @@ export function AppWorkbench() {
       return;
     }
     try {
-      const [p, s, settings, cli, modelsRes] = await Promise.all([
+      const [p, s, settings, cli, modelsRes, providersRes] = await Promise.all([
         api.projectsList(),
         api.sessionsList(),
         api.settingsGet(),
         api.probeCli(),
         api.modelsListAvailable().catch(() => null),
+        api.providersList().catch(() => null),
       ]);
       setProjects(mapProjectsList(p as Project[]));
       setSessions(
@@ -2854,6 +2855,19 @@ export function AppWorkbench() {
               };
             })
           : GROK_BUILD_MODELS;
+      if (providersRes) {
+        setCustomProviders(providersRes.providers);
+        setProviderActiveSource(providersRes.activeSource);
+        setProviderActiveId(providersRes.activeProviderId);
+        setActiveCustomProvider(
+          providersRes.activeSource === "custom"
+            ? providersRes.providers.find(
+                (provider) => provider.id === providersRes.activeProviderId,
+              ) ?? null
+            : null,
+        );
+        providerRouteHydratedRef.current = true;
+      }
       setAvailableModels(catalog);
       if (
         settings.composerPrefsScope &&
@@ -3808,6 +3822,22 @@ export function AppWorkbench() {
     // Point viewing id immediately so late stream chunks land in the right cache.
     openingSessionIdRef.current = s.id;
     viewingSessionIdRef.current = s.id;
+    // Atomically swap the visible transcript to the target session before its
+    // journal/media hydration finishes; never paint the old chat under a new id.
+    const cachedTarget = messagesBySessionRef.current.get(s.id) ?? [];
+    setMessages(cachedTarget);
+    setContextUsage(
+      reduceContextUsage(INITIAL_CONTEXT_USAGE, {
+        type: "hydrate",
+        messages: cachedTarget,
+      }),
+    );
+    setSession({
+      ...IDLE_SNAPSHOT,
+      sessionId: s.id,
+      title: s.title || "Untitled",
+      backend: "grok_agent_stdio",
+    });
     // Opening/viewing clears the sidebar unread dot for this chat.
     clearSessionUnread(s.id);
     // Swap plan chrome to this session (or hide if none / not yet streamed).
@@ -3958,7 +3988,25 @@ export function AppWorkbench() {
         const { cleanText } = extractAutomationPayload(m.content);
         return cleanText === m.content ? m : { ...m, content: cleanText };
       });
-      setMessages(stripped);
+      // A session that finished while away may still carry streaming flags from
+      // the in-memory cache (missed done/PromptComplete). Re-opening must settle
+      // them, or the thread shows a stale "思考中" next to the journal answer.
+      const resumeState = resumeStateForSession(
+        s.id,
+        liveHostRef.current,
+        liveMapRef.current,
+      );
+      const settled =
+        resumeState.state === "streaming" ||
+        resumeState.state === "awaiting_permission"
+          ? stripped
+          : stripped.map((m) =>
+              m.streaming ? { ...m, streaming: false } : m,
+            );
+      if (settled !== stripped) {
+        messagesBySessionRef.current.set(s.id, settled);
+      }
+      setMessages(settled);
       setContextUsage(
         reduceContextUsage(INITIAL_CONTEXT_USAGE, {
           type: "hydrate",
@@ -6734,6 +6782,75 @@ export function AppWorkbench() {
       document.documentElement.dataset.streamPerf = "0";
     };
   }, [session.state, transcriptMeta.hasStreamingAssistant]);
+
+  // Host-independent turn watchdog: if the Host's done/PromptComplete event is
+  // lost (event pump wedge / focus churn), settle the viewed chat after the
+  // same hard-stall window so the send queue and /compact cannot block forever.
+  useEffect(() => {
+    if (
+      session.state !== "streaming" &&
+      session.state !== "awaiting_permission"
+    ) {
+      return;
+    }
+    if (!turnStartedAt) return;
+    const hardSecs = Math.max(
+      600,
+      Math.min(1800, Math.round(streamStallSeconds) * 3),
+    );
+    const timer = window.setTimeout(() => {
+      if (viewingSessionIdRef.current !== session.sessionId) return;
+      setTurnStartedAt(null);
+      setStreamStall(null);
+      setSession((prev) =>
+        prev.state === "streaming" || prev.state === "awaiting_permission"
+          ? {
+              ...prev,
+              state: prev.sessionId ? "ready" : prev.state,
+              streamingMessageId: null,
+              lastError: null,
+            }
+          : prev,
+      );
+      setLiveHost((prev) => {
+        if (
+          prev.sessionId !== session.sessionId ||
+          (prev.state !== "streaming" && prev.state !== "awaiting_permission")
+        ) {
+          return prev;
+        }
+        const next = {
+          ...prev,
+          state: "ready" as const,
+          streamingMessageId: null,
+          lastError: null,
+        };
+        liveHostRef.current = next;
+        return next;
+      });
+      setMessages((prev) => {
+        if (!prev.some((m) => m.streaming)) return prev;
+        const next = prev.map((m) =>
+          m.streaming ? { ...m, streaming: false } : m,
+        );
+        if (session.sessionId) {
+          messagesBySessionRef.current.set(session.sessionId, next);
+        }
+        return next;
+      });
+    }, hardSecs * 1000);
+    return () => window.clearTimeout(timer);
+  }, [
+    session.state,
+    session.sessionId,
+    turnStartedAt,
+    streamStallSeconds,
+    setTurnStartedAt,
+    setStreamStall,
+    setSession,
+    setLiveHost,
+    setMessages,
+  ]);
 
   const canEditLastUser =
     !!lastUserMessageId &&
@@ -10496,6 +10613,7 @@ export function AppWorkbench() {
   const [providerActiveSource, setProviderActiveSource] =
     useState<string>("official");
   const [providerActiveId, setProviderActiveId] = useState<string | null>(null);
+  const providerRouteHydratedRef = useRef(false);
   const [modelPickBusy, setModelPickBusy] = useState(false);
   const customRouteActive = activeCustomProvider != null;
   const composerProviderInputs = useMemo(
@@ -10536,8 +10654,9 @@ export function AppWorkbench() {
     }
   }, []);
   useEffect(() => {
+    if (appGate === "loading" || providerRouteHydratedRef.current) return;
     void refreshProviderRoute();
-  }, [refreshProviderRoute]);
+  }, [appGate, refreshProviderRoute]);
   // Re-evaluate composer mic when switching official ↔ custom provider.
   useEffect(() => {
     void refreshVoiceGate();
@@ -21285,7 +21404,10 @@ export function AppWorkbench() {
                 const cmd = buildCompactSlashCommand(note, { preset });
                 try {
                   const sid = await ensureConnected();
-                  if (!sid) return;
+                  if (!sid) {
+                    setLocalError(tr("slash.compactConnectFailed"));
+                    return;
+                  }
                   pendingCompactBeforeRef.current = {
                     sessionId: sid,
                     tokensBefore:
@@ -21319,6 +21441,7 @@ export function AppWorkbench() {
                 <IconClose size={16} />
               </button>
             </header>
+            <div className="modal-body">
             <p className="compact-modal__msg">
               {tr("slash.compactExplain")}
             </p>
@@ -21560,6 +21683,7 @@ export function AppWorkbench() {
                 {tr("slash.compactBusy")}
               </p>
             )}
+            </div>
             <div className="modal-actions">
               <button
                 type="button"

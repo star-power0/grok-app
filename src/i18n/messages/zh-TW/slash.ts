@@ -40,6 +40,7 @@ export const zhTWSlash = {
   "slash.compactCurrent": "目前上下文",
   "slash.compactCurrentUnknown": "尚未回報用量",
   "slash.compactBusy": "請等待目前回合結束後再壓縮",
+  "slash.compactConnectFailed": "連接 Agent 失敗，未能傳送 /compact",
   "slash.compactNoteChipDecisions": "關鍵決策",
   "slash.compactNoteChipErrors": "最近錯誤",
   "slash.compactNoteChipFiles": "開啟的檔案與路徑",

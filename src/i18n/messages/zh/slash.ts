@@ -40,6 +40,7 @@ export const zhSlash = {
   "slash.compactCurrent": "当前上下文",
   "slash.compactCurrentUnknown": "尚未上报用量",
   "slash.compactBusy": "请等待当前回合结束后再压缩",
+  "slash.compactConnectFailed": "连接 Agent 失败，未能发送 /compact",
   "slash.compactNoteChipDecisions": "关键决策",
   "slash.compactNoteChipErrors": "最近错误",
   "slash.compactNoteChipFiles": "打开的文件与路径",

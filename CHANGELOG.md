@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **2026-08-09 第三轮**（responses 解析宽容 / 活跃站点换模型免全量回收）。
+
+### Fixed
+- **Responses 终态 usage 稀疏兼容（CLI）**：vc 的 `response.completed` 不仅会省略
+  文本项的 `annotations`，还会省略 `usage.output_tokens_details.reasoning_tokens`；当前
+  async-openai fork 将后者视为必填，导致 fallback 补完 annotations 后仍无法解析终态帧，
+  但日志只保留第一次的 `missing field 'annotations'`，掩盖了真实第二层错误。CLI 现只在
+  整个 detail 对象缺失时补 `{ "cached_tokens": 0 }` / `{ "reasoning_tokens": 0 }`，已有
+  上游用量值保持原样。真实终态形状回归测试已覆盖。
+- **启动期模型菜单状态收敛（GUI）**：首屏初始化已获取的 provider 路由现在与模型目录
+  同批写入状态；模型选择器不再先以旧路由渲染、随后被 mount 阶段重复 `providersList`
+  覆盖。避免应用刚启动时站点/模型菜单反复重排造成的抖动和“切换中”假象；后续用户操作
+  仍会正常刷新路由。
+- **Responses 输出帧 `annotations` 稀疏兼容（CLI）**：同一中转族（vc /
+  deepseek-v4-flash）除 `response.created` 稀疏快照外，**输出帧也稀疏**——
+  `response.output_item.added` 的 `OutputMessageContent::OutputText` 缺必填
+  `annotations`（空数组被该中转省略），严格反序列化在输出阶段再次
+  `-32603 missing field 'annotations'`、对话中断。CLI 的补洞逻辑现递归
+  覆盖整棵 SSE 帧 JSON：任何 `{"type":"output_text",…}` 缺 `annotations`
+  都补空数组（含 `response.output_item.added` / 终态 `response.output` 项）。
+  `annotations` 仅引用列表，下游不消费，补空安全。回归测试用线上 raw 帧
+  断言解析成功。
+- **Responses 稀疏快照帧兼容（CLI）**：部分 Responses 中转（已确认 vc 站点的
+  deepseek-v4-flash）会在 `response.created` 等早期帧里只回传**部分** `response`
+  快照——缺顶层 `sequence_number`、缺 `Response::created_at` 等必填字段，严格
+  反序列化器直接报废，导致 `session/prompt` 报 `-32603 serialization error`、会话
+  回收（`Failed to deserialize ResponseStreamEvent … missing field 'created_at'`）。
+  CLI 现对缺失的必填字段补中性默认值后再解析（`deserialize_response_event` 仅
+  在严格解析失败时启用，正常帧不受影响；`created_at` 等生命周期快照字段本就不被
+  下游消费，只读终态事件的 output/usage/status/error/metadata）。完整线上证据与
+  修复见 `E:\GrokBuild\ITERATION-2026-08-09-model-switch-responses.md`。
+- **活跃站点改请求模型不再整池回收（Host）**：composer 模型选择器只改活跃普通
+  站的请求模型/目录（不带 api_key，认证未动）时，Host 现在先走实时
+  `session/set_model` 重绑（与渠道切换同路径），只有实时重绑失败（模型不在 CLI
+  内存注册表等）才回退 `recycle_all_agents`。此前每次改请求模型都会杀掉全部
+  活跃/驻留 agent 重连（日志 `recycle reason=provider_route killed=N`），是启动
+  后首次切模型慢、聊天区抖动的直接来源。
+
+### Known Issues
++- **启动期模型窗口抖动仍未解决（GUI）**：冷启动后数分钟内打开或切换模型时，模型
+  窗口仍可能抖动且响应偏慢；完成一次对话后恢复正常。首屏 provider 路由同批 hydration
+  与活跃站模型实时重绑已部署，但未消除该现象。现阶段不继续猜测根因，后续应采集冷启动
+  时的前端渲染、IPC 时序和 agent 状态后单独修复。
+
+> **2026-08-09 UI 稳定性迭代**：修复会话切换时的虚拟化窗口闪动，以及账户配置提供商列表在多站点时被压缩重叠。
+
+### Fixed
+- 会话切换时，消息虚拟化高度缓存现在在布局阶段同步清理，并取消旧会话的延迟重算，避免新旧会话共用旧 spacer/window 导致聊天区域闪动。
+- 打开历史会话时先切换到目标会话的缓存消息和稳定会话壳，等磁盘消息、媒体路径分类完成后再替换完整内容，避免旧会话内容挂在新会话身份下。
+- 账户配置的提供商卡片固定最小高度并禁止 flex 收缩；提供商列表栏保持独立滚动，新增站点不会再挤压或覆盖已有卡片。
+
 > **夜间迭代 2026-08-06/07**（三大问题：读图 / 流式 / 消息队列）。
 > 完整过程与根因见 `E:\GrokBuild\ITERATION-2026-08-06-night.md`。
 
@@ -41,6 +92,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   「是否有 pending 的 session/prompt RPC」：排队回复流经时不再被误判为历史重放。
 
 ### Fixed
+- **Responses 中转心跳兼容（CLI）**：部分 Responses 中转会在 SSE 流中插入非标准
+  `{"type":"ping"}` 心跳帧；Grok Build 0.2.120 此前将其交给严格的 `ResponseStreamEvent`
+  解析器，导致 `-32603 serialization error`，已经流出的文字会随后被 App 的网络/模型错误卡覆盖，
+  `/compact` 也可能在终态前中断。CLI 现仅跳过该心跳帧，`response.failed` / `response.error`
+  和真实 HTTP 502/503 仍按失败处理。完整根因与部署记录见
+  `E:\GrokBuild\ITERATION-2026-08-08-responses-ping.md`。
+
+- **Chat Completions 空 `finish_reason` 兼容（CLI）**：部分中转（已确认“射”站点）会把非终止流式 chunk 的 `finish_reason` 发成空字符串，严格枚举解析会触发 ACP `-32603` 并导致 App 回收 Agent。CLI 现将该字段的 `""` 窄范围视为未结束；合法终止值保持原语义，未知值仍报错。详见 `E:\GrokBuild\ITERATION-2026-08-08-responses-ping.md`。
+
 - 队列消息回复丢失：任务进行中发送的排队消息，模型回复此前不可见（需切换对话或重启才显示）；
   现可实时流式显示。
 - **切换模型对话崩溃（400 `AGENT_CRASHED`）**：CLI `read_file` 读图把图片 base64 放进 tool

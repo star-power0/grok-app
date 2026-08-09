@@ -523,7 +523,7 @@ No repo edits. Prefer built-in tools. Keep the final answer concise and complete
     let prompt_fut = client.prompt(prompt);
     let prompt_res = tokio::time::timeout(timeout, prompt_fut).await;
     match prompt_res {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             client.kill().await;
             let _ = pump.await;

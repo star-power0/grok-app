@@ -1400,6 +1400,7 @@ mod tests {
                 base_url: "https://ex/v1".into(),
                 name: "Relay".into(),
                 has_api_key: true,
+                supports_vision: false,
                 api_backend: "responses".into(),
                 is_default: true,
                 models: vec![ProviderModelEntry {

@@ -935,13 +935,13 @@ impl SessionManager {
                 }
             }
             AcpEvent::ContextCompact {
-                trigger,
+                mut trigger,
                 tokens_before,
                 tokens_after,
                 summary_preview,
                 note,
             } => {
-                let (app_sid, content) = {
+                let app_sid = {
                     let guard = self.inner.lock();
                     let Some(s) = guard.as_ref() else {
                         return;
@@ -953,60 +953,25 @@ impl SessionManager {
                         );
                         return;
                     }
-                    let mut parts = Vec::new();
-                    if trigger == "manual" {
-                        parts.push("manual".to_string());
-                    } else {
-                        parts.push("auto".to_string());
-                    }
-                    if let (Some(b), Some(a)) = (tokens_before, tokens_after) {
-                        parts.push(format!("tokens:{b}->{a}"));
-                    } else if let Some(b) = tokens_before {
-                        parts.push(format!("tokens_before:{b}"));
-                    } else if let Some(a) = tokens_after {
-                        parts.push(format!("tokens_after:{a}"));
-                    }
-                    if let Some(n) = note.as_ref().filter(|s| !s.is_empty()) {
-                        parts.push(format!("note:{n}"));
-                    }
-                    // Machine-readable line for UI; human copy is i18n on frontend.
-                    let mut content = format!("context_compact|{}", parts.join("|"));
-                    if let Some(sum) = summary_preview
-                        .as_ref()
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                    {
-                        content.push('\n');
-                        content.push_str(sum);
-                    }
-                    (s.app_session_id.clone(), content)
+                    s.app_session_id.clone()
                 };
-                let mid = Uuid::new_v4().to_string();
-                let _ = store::append_message(
+                let pending_manual = self.manual_compact_pending.lock().remove(&app_sid);
+                if pending_manual {
+                    trigger = "manual".into();
+                } else if trigger == "manual" {
+                    tracing::debug!(
+                        "acp context_compact ignored: manual command already completed sid={app_sid}"
+                    );
+                    return;
+                }
+                Self::emit_context_compact(
+                    app,
                     &app_sid,
-                    ChatMessageStored {
-                        id: mid.clone(),
-                        role: "tool".into(),
-                        content: content.clone(),
-                        thought: None,
-                        created_at: chrono::Utc::now(),
-                        is_error: false,
-                        attachments: None,
-                        marker: Some("context_compact".into()),
-                    },
-                );
-                let _ = app.emit(
-                    "session://context_compact",
-                    serde_json::json!({
-                        "sessionId": app_sid,
-                        "messageId": mid,
-                        "trigger": trigger,
-                        "tokensBefore": tokens_before,
-                        "tokensAfter": tokens_after,
-                        "summaryPreview": summary_preview,
-                        "note": note,
-                        "content": content,
-                    }),
+                    trigger,
+                    tokens_before,
+                    tokens_after,
+                    summary_preview,
+                    note,
                 );
             }
             AcpEvent::UsageReported {
@@ -1043,5 +1008,71 @@ impl SessionManager {
                 );
             }
         }
+    }
+
+    /// Persist and forward one completed compaction, including the manual
+    /// command-RPC fallback used when the CLI has no session/update payload.
+    pub(super) fn emit_context_compact(
+        app: &AppHandle,
+        app_sid: &str,
+        trigger: String,
+        tokens_before: Option<u64>,
+        tokens_after: Option<u64>,
+        summary_preview: Option<String>,
+        note: Option<String>,
+    ) {
+        let mut parts = Vec::new();
+        if trigger == "manual" {
+            parts.push("manual".to_string());
+        } else {
+            parts.push("auto".to_string());
+        }
+        if let (Some(b), Some(a)) = (tokens_before, tokens_after) {
+            parts.push(format!("tokens:{b}->{a}"));
+        } else if let Some(b) = tokens_before {
+            parts.push(format!("tokens_before:{b}"));
+        } else if let Some(a) = tokens_after {
+            parts.push(format!("tokens_after:{a}"));
+        }
+        if let Some(n) = note.as_ref().filter(|s| !s.is_empty()) {
+            parts.push(format!("note:{n}"));
+        }
+        // Machine-readable line for UI; human copy is i18n on frontend.
+        let mut content = format!("context_compact|{}", parts.join("|"));
+        if let Some(sum) = summary_preview
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            content.push('\n');
+            content.push_str(sum);
+        }
+        let mid = Uuid::new_v4().to_string();
+        let _ = store::append_message(
+            app_sid,
+            ChatMessageStored {
+                id: mid.clone(),
+                role: "tool".into(),
+                content: content.clone(),
+                thought: None,
+                created_at: chrono::Utc::now(),
+                is_error: false,
+                attachments: None,
+                marker: Some("context_compact".into()),
+            },
+        );
+        let _ = app.emit(
+            "session://context_compact",
+            serde_json::json!({
+                "sessionId": app_sid,
+                "messageId": mid,
+                "trigger": trigger,
+                "tokensBefore": tokens_before,
+                "tokensAfter": tokens_after,
+                "summaryPreview": summary_preview,
+                "note": note,
+                "content": content,
+            }),
+        );
     }
 }

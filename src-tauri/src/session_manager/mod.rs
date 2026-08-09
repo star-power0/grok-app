@@ -37,7 +37,7 @@ mod routing_tests;
 #[cfg(test)]
 mod stall_tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parking_lot::Mutex;
 
@@ -55,6 +55,10 @@ pub struct SessionManager {
     pub(super) background: Mutex<HashMap<String, LiveSession>>,
     /// Warm Ready agents for other App sessions (keyed by app session id).
     pub(super) parked: Mutex<HashMap<String, ParkedAgent>>,
+    /// Manual `/compact` turns awaiting either an ACP compact update or their
+    /// successful command RPC result. The latter is required because the CLI
+    /// reports manual compact completion as an extension RPC, not session/update.
+    pub(super) manual_compact_pending: Mutex<HashSet<String>>,
     /// Serialize connect / park / unpark so openSession prefetch cannot race first send.
     pub(super) connect_lock: tokio::sync::Mutex<()>,
 }
@@ -71,6 +75,7 @@ impl SessionManager {
             inner: Mutex::new(None),
             background: Mutex::new(HashMap::new()),
             parked: Mutex::new(HashMap::new()),
+            manual_compact_pending: Mutex::new(HashSet::new()),
             connect_lock: tokio::sync::Mutex::new(()),
         }
     }

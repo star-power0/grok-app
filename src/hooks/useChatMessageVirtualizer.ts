@@ -120,13 +120,22 @@ export function useChatMessageVirtualizer(
 
   const [win, setWin] = useState<ChatVirtualWindow>(() => full(itemCount));
 
-  // Drop height cache on conversation change.
-  useEffect(() => {
+  // Drop height cache before paint so a session switch never renders the new
+  // transcript with the previous session's window or spacer measurements.
+  useLayoutEffect(() => {
     heightsRef.current.clear();
     heightsVersionRef.current = 0;
     offsetsCacheRef.current = null;
     for (const ro of rowObserversRef.current.values()) ro.disconnect();
     rowObserversRef.current.clear();
+    if (recomputeTimerRef.current != null) {
+      clearTimeout(recomputeTimerRef.current);
+      recomputeTimerRef.current = null;
+    }
+    if (scrollRafRef.current != null) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
     setWin(full(itemCount));
   }, [conversationKey]); // eslint-disable-line react-hooks/exhaustive-deps
 

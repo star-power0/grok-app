@@ -2594,7 +2594,9 @@ impl AcpClient {
         }
     }
 
-    pub async fn prompt(&self, text: &str) -> Result<(), AgentError> {
+    /// Returns the agent-reported `stopReason` so the Host can schedule an
+    /// authoritative turn-close fallback if the event pump is wedged.
+    pub async fn prompt(&self, text: &str) -> Result<String, AgentError> {
         self.prompt_with_blocks(&[ContentBlockData::Text(text.to_string())])
             .await
     }
@@ -2610,7 +2612,7 @@ impl AcpClient {
         &self,
         text: &str,
         images: &[PromptImageData],
-    ) -> Result<(), AgentError> {
+    ) -> Result<String, AgentError> {
         let mut blocks: Vec<ContentBlockData> = Vec::with_capacity(images.len() + 1);
         blocks.push(ContentBlockData::Text(text.to_string()));
         for img in images {
@@ -2622,7 +2624,7 @@ impl AcpClient {
         self.prompt_with_blocks(&blocks).await
     }
 
-    async fn prompt_with_blocks(&self, blocks: &[ContentBlockData]) -> Result<(), AgentError> {
+    async fn prompt_with_blocks(&self, blocks: &[ContentBlockData]) -> Result<String, AgentError> {
         let sid = self
             .agent_session_id
             .lock()
@@ -2655,10 +2657,10 @@ impl AcpClient {
             done: true,
         });
         let _ = self.event_tx.send(AcpEvent::PromptComplete {
-            stop_reason: stop,
+            stop_reason: stop.clone(),
             authoritative: true,
         });
-        Ok(())
+        Ok(stop)
     }
 
     /// Inject guidance into the active prompt without cancelling the turn.

@@ -164,6 +164,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 54px;
+  flex: 0 0 auto;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);

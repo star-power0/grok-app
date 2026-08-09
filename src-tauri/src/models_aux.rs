@@ -649,7 +649,10 @@ pub fn main_is_text_only_for(
         return !sv.trim().eq_ignore_ascii_case("true");
     }
     // `def` may be an upstream model id (gpt-5.6-luna) → resolve to its channel.
-    let provider = list.providers.iter().find(|p| p.id == def || p.model == def);
+    let provider = list
+        .providers
+        .iter()
+        .find(|p| p.id == def || p.model == def);
     if let Some(p) = provider {
         if let Some(sv) = get_table_string(text, &format!("model.{}", p.id), "supports_vision") {
             return !sv.trim().eq_ignore_ascii_case("true");
@@ -1779,6 +1782,7 @@ A red button.
                 base_url: "https://api.amux.ai/v1".into(),
                 name: "Amux".into(),
                 has_api_key: true,
+                supports_vision: false,
                 api_backend: "responses".into(),
                 is_default: false,
                 models: vec![],
@@ -1830,6 +1834,7 @@ A red button.
                 base_url: "https://api.amux.ai/v1".into(),
                 name: "Amux".into(),
                 has_api_key: true,
+                supports_vision: false,
                 api_backend: "responses".into(),
                 is_default: false,
                 models: vec![],
@@ -1867,6 +1872,7 @@ supports_vision = true
                 base_url: "https://pulseaify.com/v1".into(),
                 name: "puls".into(),
                 has_api_key: true,
+                supports_vision: false,
                 api_backend: "chat_completions".into(),
                 is_default: true,
                 models: vec![],
@@ -1908,6 +1914,7 @@ api_key = "sk-x"
                 base_url: "https://pulseaify.com/v1".into(),
                 name: "puls".into(),
                 has_api_key: true,
+                supports_vision: false,
                 api_backend: "chat_completions".into(),
                 is_default: true,
                 models: vec![],

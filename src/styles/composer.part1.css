@@ -775,7 +775,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-split {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
   flex: 1 1 auto;

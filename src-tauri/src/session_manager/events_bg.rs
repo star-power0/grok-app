@@ -554,6 +554,32 @@ impl SessionManager {
                 self.promote_background_ready_to_parked(app_session_id);
                 Self::emit_state(app, &self.snapshot());
             }
+            AcpEvent::ContextCompact {
+                mut trigger,
+                tokens_before,
+                tokens_after,
+                summary_preview,
+                note,
+            } => {
+                let pending_manual = self.manual_compact_pending.lock().remove(app_session_id);
+                if pending_manual {
+                    trigger = "manual".into();
+                } else if trigger == "manual" {
+                    tracing::debug!(
+                        "background context_compact ignored: manual command already completed sid={app_session_id}"
+                    );
+                    return;
+                }
+                Self::emit_context_compact(
+                    app,
+                    app_session_id,
+                    trigger,
+                    tokens_before,
+                    tokens_after,
+                    summary_preview,
+                    note,
+                );
+            }
             AcpEvent::UsageReported {
                 total_tokens,
                 input_tokens,

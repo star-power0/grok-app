@@ -40,6 +40,7 @@ export const enSlash = {
   "slash.compactCurrent": "Current context",
   "slash.compactCurrentUnknown": "Unknown until usage is reported",
   "slash.compactBusy": "Wait for the current turn to finish before compacting",
+  "slash.compactConnectFailed": "Could not connect the agent to send /compact",
   "slash.compactNoteChipDecisions": "Key decisions",
   "slash.compactNoteChipErrors": "Recent errors",
   "slash.compactNoteChipFiles": "Open files & paths",

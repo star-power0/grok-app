@@ -135,6 +135,9 @@ pub async fn providers_upsert(
 ) -> Result<crate::providers::ProvidersListResult, String> {
     let set_default_flag = set_as_default.unwrap_or(false);
     let mutated_id = id.clone();
+    // Cache before `api_key` moves into the spawn closure: the composer picker
+    // omits the key entirely (auth untouched); the edit form always sends it.
+    let api_key_absent = api_key.is_none();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let result =
             crate::providers::upsert_custom_provider(crate::providers::UpsertProviderInput {
@@ -186,6 +189,33 @@ pub async fn providers_upsert(
         &mutated_id,
         &result,
     ) {
+        // Fast path: the composer picker mutates ONLY the active custom
+        // provider's request model / catalog (it sends no api_key, so auth is
+        // untouched). Rebinding the live agent via session/set_model is enough;
+        // recycling every warm/parked shell on a plain model change is what
+        // makes the first model switch after boot slow (<second → multi-second
+        // reconnect) and the chat area visibly flicker.
+        let model_only = !set_default_flag
+            && api_key_absent
+            && result.active_source == "custom"
+            && result.active_provider_id.as_deref() == Some(mutated_id.as_str());
+        let rebind_model = if model_only {
+            result
+                .default_model
+                .clone()
+                .filter(|m| !m.trim().is_empty())
+        } else {
+            None
+        };
+        if let Some(default) = rebind_model {
+            if mgr.set_model(default).await.is_ok() {
+                tracing::info!(
+                    "providers_upsert: live-rebound request model on active provider (no recycle) id={}",
+                    mutated_id
+                );
+                return Ok(result);
+            }
+        }
         mgr.recycle_all_agents(&app, "provider_route").await;
     }
     Ok(result)

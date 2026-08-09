@@ -187,7 +187,16 @@ impl SessionManager {
                             Self::live_session_is_busy(s),
                             preserve
                         );
-                        return Ok(self.snapshot());
+                        drop(guard);
+                        // Reconnect races (focus churn while the agent is mid-turn) hit
+                        // this branch and used to only return the snapshot to the
+                        // triggering invoke call — the front end never got a
+                        // `session://state` push and could stay stuck showing a stale
+                        // "working" indicator until some unrelated event happened to
+                        // refresh it. Broadcast here too so any reconnect resyncs the UI.
+                        let snap = self.snapshot();
+                        Self::emit_state(&app, &snap);
+                        return Ok(snap);
                     }
                 }
             }
