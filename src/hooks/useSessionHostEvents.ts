@@ -242,6 +242,9 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
           status?: string;
           path?: string | null;
           detail?: string | null;
+          artifactRef?: string | null;
+          outputBytes?: number | null;
+          detailTruncated?: boolean | null;
           before?: string | null;
           after?: string | null;
         }> | null = null;
@@ -541,6 +544,9 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
           status?: string;
           path?: string | null;
           detail?: string | null;
+          artifactRef?: string | null;
+          outputBytes?: number | null;
+          detailTruncated?: boolean | null;
           before?: string | null;
           after?: string | null;
         };
@@ -582,6 +588,9 @@ export function useSessionHostEvents(ctx: SessionHostEventsCtx) {
                   status: p.status,
                   path: p.path,
                   detail: p.detail,
+                  artifactRef: p.artifactRef,
+                  outputBytes: p.outputBytes,
+                  detailTruncated: p.detailTruncated,
                   before: p.before,
                   after: p.after,
                 });

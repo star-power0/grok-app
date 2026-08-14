@@ -143,6 +143,10 @@ export const enComposer = {
   "composer.modelGroupOfficial": "Official",
   "composer.modelSearchPlaceholder": "Search models…",
   "composer.modelSearchEmpty": "No models match",
+  "composer.modelAppliesNextTurn":
+    "Applies from the next turn — the running turn keeps its model.",
+  "composer.modelAppliesNextTurnFrom":
+    "Applies from the next turn — the running turn is still using {model}.",
   "composer.effort": "Reasoning",
   "composer.mode": "Mode",
   "composer.permission": "Permission",

@@ -20,6 +20,142 @@ use crate::store::{self, ChatMessageStored};
 use super::*;
 
 impl SessionManager {
+    /// Emit one MCP lifecycle event scoped to the session that reported it.
+    ///
+    /// Scope matters: the UI keys MCP rows by project/cwd, and a stale event from
+    /// another chat must not overwrite the panel the user is looking at. MCP
+    /// status is session runtime state, so replay gating used for chat output
+    /// does not apply here.
+    pub(super) fn emit_mcp_event(&self, app: &AppHandle, event: &str, payload: serde_json::Value) {
+        let (session_id, project_path) = {
+            let guard = self.inner.lock();
+            match guard.as_ref() {
+                Some(s) => (s.app_session_id.clone(), s.project_path.clone()),
+                None => return,
+            }
+        };
+        self.emit_mcp_event_for_session(app, &session_id, project_path.as_deref(), event, payload);
+    }
+
+    pub(super) fn emit_mcp_event_for_session(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        project_path: Option<&str>,
+        event: &str,
+        mut payload: serde_json::Value,
+    ) {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("sessionId".into(), serde_json::json!(session_id));
+            obj.insert("projectPath".into(), serde_json::json!(project_path));
+        }
+        self.update_mcp_runtime_snapshot(event, session_id, &payload);
+        let _ = app.emit(event, payload);
+    }
+
+    fn update_mcp_runtime_snapshot(
+        &self,
+        event: &str,
+        session_id: &str,
+        payload: &serde_json::Value,
+    ) {
+        let process_id = {
+            let live = self
+                .inner
+                .lock()
+                .as_ref()
+                .filter(|session| session.app_session_id == session_id)
+                .map(|session| session.process_id.clone());
+            if live.is_some() {
+                live
+            } else {
+                self.background
+                    .lock()
+                    .get(session_id)
+                    .map(|session| session.process_id.clone())
+            }
+        };
+        let mut all = self.mcp_runtime.lock();
+        let state = all
+            .entry(session_id.to_string())
+            .or_insert_with(|| McpRuntimeSnapshot {
+                session_id: Some(session_id.to_string()),
+                process_id: process_id.clone(),
+                source: "session".into(),
+                ..Default::default()
+            });
+        if state.process_id != process_id {
+            *state = McpRuntimeSnapshot {
+                session_id: Some(session_id.to_string()),
+                process_id,
+                source: "session".into(),
+                ..Default::default()
+            };
+        }
+        match event {
+            "mcp://init_progress" => {
+                state.connected = payload
+                    .get("connected")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok());
+                state.total = payload
+                    .get("total")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok());
+                state.initialized = false;
+            }
+            "mcp://initialized" => {
+                state.initialized = true;
+                state.connected = state.total.or(state.connected);
+            }
+            "mcp://server_status" => {
+                let Some(name) = payload
+                    .get("server")
+                    .or_else(|| payload.get("name"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return;
+                };
+                let status = payload
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let reason = payload
+                    .get("reason")
+                    .or_else(|| payload.get("detail"))
+                    .and_then(|value| value.as_str())
+                    .map(crate::store::redact_text);
+                let tool_count = payload
+                    .get("toolCount")
+                    .or_else(|| payload.get("tools"))
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_array().map(|items| items.len() as u64))
+                    })
+                    .and_then(|value| u32::try_from(value).ok());
+                let row = McpRuntimeServer {
+                    name: name.to_string(),
+                    status,
+                    reason,
+                    tool_count,
+                    observed_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Some(existing) = state.servers.iter_mut().find(|item| item.name == row.name)
+                {
+                    *existing = row;
+                } else {
+                    state.servers.push(row);
+                }
+            }
+            "mcp://catalog_stale" => state.catalog_stale = true,
+            _ => {}
+        }
+    }
+
     pub(super) async fn handle_acp_event(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -50,10 +186,30 @@ impl SessionManager {
                 return;
             }
             if let AcpEvent::ProcessExited { .. } = &ev {
-                let mut parked = self.parked.lock();
-                parked.retain(|_, p| p.process_id != process_id);
-                let mut bg = self.background.lock();
-                bg.retain(|_, s| s.process_id != process_id);
+                let mut removed_sessions = Vec::new();
+                {
+                    let mut parked = self.parked.lock();
+                    for session in parked.values() {
+                        if session.process_id == process_id {
+                            removed_sessions.push(session.app_session_id.clone());
+                        }
+                    }
+                    parked.retain(|_, session| session.process_id != process_id);
+                }
+                {
+                    let mut background = self.background.lock();
+                    for session in background.values() {
+                        if session.process_id == process_id {
+                            removed_sessions.push(session.app_session_id.clone());
+                        }
+                    }
+                    background.retain(|_, session| session.process_id != process_id);
+                }
+                let mut runtime = self.mcp_runtime.lock();
+                runtime.retain(|session_id, snapshot| {
+                    snapshot.process_id.as_deref() != Some(process_id)
+                        && !removed_sessions.iter().any(|id| id == session_id)
+                });
                 return;
             }
             // Still talking but parked (should be impossible now that
@@ -403,6 +559,23 @@ impl SessionManager {
                 };
 
                 let (detail, path_hint) = extract_tool_ui_fields(&raw);
+                // Persist the complete output independently from the short UI
+                // summary. Protocol-specific result content can be much richer
+                // than the timeline preview; never discard it merely because a
+                // relay or UI row only accepts a compact string.
+                let tool_artifact =
+                    if status == "completed" || status == "failed" || status == "error" {
+                        extract_tool_result_text(&raw).and_then(|text| {
+                            let sid = self.inner.lock().as_ref()?.app_session_id.clone();
+                            crate::tool_artifacts::persist_tool_output(&sid, &text).ok()
+                        })
+                    } else {
+                        None
+                    };
+                let detail = tool_artifact
+                    .as_ref()
+                    .and_then(|artifact| artifact.detail.clone())
+                    .or(detail);
                 let path_out = structured_media
                     .clone()
                     .or_else(|| freeform_media.clone())
@@ -552,6 +725,9 @@ impl SessionManager {
                         "status": if status.is_empty() { "in_progress" } else { &status },
                         "path": path_out,
                         "detail": detail,
+                        "artifactRef": tool_artifact.as_ref().and_then(|artifact| artifact.artifact_ref.clone()),
+                        "outputBytes": tool_artifact.as_ref().map(|artifact| artifact.output_bytes),
+                        "detailTruncated": tool_artifact.as_ref().map(|artifact| artifact.detail_truncated).unwrap_or(false),
                         // Optional content snippets for the session Changes / diff panel.
                         "before": before_snip,
                         "after": after_snip,
@@ -615,10 +791,54 @@ impl SessionManager {
                                 is_error: matches!(st, "failed" | "error"),
                                 attachments: None,
                                 marker: Some("tool_step".into()),
+                                tool_artifact_ref: tool_artifact
+                                    .as_ref()
+                                    .and_then(|artifact| artifact.artifact_ref.clone()),
+                                tool_output_bytes: tool_artifact
+                                    .as_ref()
+                                    .map(|artifact| artifact.output_bytes),
+                                tool_detail_truncated: tool_artifact
+                                    .as_ref()
+                                    .map(|artifact| artifact.detail_truncated)
+                                    .unwrap_or(false),
                             },
                         );
                     }
                 }
+            }
+            AcpEvent::McpInitProgress { connected, total } => {
+                self.emit_mcp_event(
+                    app,
+                    "mcp://init_progress",
+                    serde_json::json!({ "connected": connected, "total": total }),
+                );
+            }
+            AcpEvent::McpInitialized => {
+                self.emit_mcp_event(app, "mcp://initialized", serde_json::json!({}));
+            }
+            AcpEvent::McpServerStatus {
+                server,
+                status,
+                reason,
+                tool_count,
+            } => {
+                self.emit_mcp_event(
+                    app,
+                    "mcp://server_status",
+                    serde_json::json!({
+                        "server": server,
+                        "status": status,
+                        "reason": reason,
+                        "toolCount": tool_count,
+                    }),
+                );
+            }
+            AcpEvent::McpCatalogStale { kind, server } => {
+                self.emit_mcp_event(
+                    app,
+                    "mcp://catalog_stale",
+                    serde_json::json!({ "kind": kind, "server": server }),
+                );
             }
             AcpEvent::ToolOpenReleased { tool_call_id } => {
                 let empty_run = {
@@ -718,6 +938,11 @@ impl SessionManager {
             }
             AcpEvent::ProcessExited { .. } => {
                 {
+                    let mut runtime = self.mcp_runtime.lock();
+                    runtime
+                        .retain(|_, snapshot| snapshot.process_id.as_deref() != Some(process_id));
+                }
+                {
                     let mut guard = self.inner.lock();
                     if let Some(s) = guard.as_mut() {
                         let st = s.fsm.state();
@@ -740,6 +965,9 @@ impl SessionManager {
                                     is_error: true,
                                     attachments: None,
                                     marker: Some("turn_cancelled".into()),
+                                    tool_artifact_ref: None,
+                                    tool_output_bytes: None,
+                                    tool_detail_truncated: false,
                                 },
                             );
                             let _ = app.emit(
@@ -772,7 +1000,7 @@ impl SessionManager {
                         s.open_tool_seen_at.clear();
                         s.deferred_prompt_complete = None;
                         s.streaming_message_id = None;
-                        s.active_turn_id = None;
+                        Self::close_run_locked(s);
                         s.stream_message_id_locked = false;
                         s.prompt_in_flight = false;
                     }
@@ -1059,6 +1287,9 @@ impl SessionManager {
                 is_error: false,
                 attachments: None,
                 marker: Some("context_compact".into()),
+                tool_artifact_ref: None,
+                tool_output_bytes: None,
+                tool_detail_truncated: false,
             },
         );
         let _ = app.emit(

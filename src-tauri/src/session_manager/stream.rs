@@ -14,6 +14,8 @@ use crate::stream_emit::{
     should_flush_stream_emit, stream_emit_can_merge, DEFAULT_STREAM_EMIT_MAX_CHARS,
     DEFAULT_STREAM_EMIT_MS,
 };
+
+use super::run::{self, ActiveRun};
 use crate::stream_stall::{
     journal_tool_is_terminal, normalize_stream_stall_seconds, should_prune_open_tool_id,
     stream_stall_message, StallTier,
@@ -204,8 +206,8 @@ impl SessionManager {
         // more text (it fires `prompt_complete` early). Ending the turn here is
         // what truncated answers mid-sentence and made the chat look stuck.
         // `schedule_prompt_complete_fallback` releases the waiter once the agent
-        // has gone quiet (and `PROMPT_TIMEOUT_SECS` caps a wedged RPC), so this
-        // cannot hang.
+        // has gone quiet (and the absolute prompt timeout caps a wedged RPC), so
+        // this cannot hang.
         if s.prompt_in_flight {
             return None;
         }
@@ -260,7 +262,7 @@ impl SessionManager {
             let _ = s.fsm.end_stream();
         }
         s.streaming_message_id = None;
-        s.active_turn_id = None;
+        Self::close_run_locked(s);
         s.stream_message_id_locked = false;
         s.last_stall_emit = None;
         tracing::info!("acp turn finished after deferred prompt_complete stop={stop_reason}");
@@ -359,7 +361,7 @@ impl SessionManager {
             let _ = s.fsm.end_stream();
         }
         s.streaming_message_id = None;
-        s.active_turn_id = None;
+        Self::close_run_locked(s);
         s.stream_message_id_locked = false;
         s.last_stall_emit = None;
         s.stall_soft_emits = 0;
@@ -502,6 +504,9 @@ impl SessionManager {
                 is_error: false,
                 attachments: atts,
                 marker: None,
+                tool_artifact_ref: None,
+                tool_output_bytes: None,
+                tool_detail_truncated: false,
             },
         );
         s.meta.updated_at = chrono::Utc::now();
@@ -751,9 +756,9 @@ impl SessionManager {
         s.journal_throttle.reset();
     }
 
-    /// Select the active interjection target (backend, app session id, turn id,
-    /// optional ACP client) from a live session, validating that a streaming
-    /// turn is in progress.
+    /// Select the active interjection target (backend, app session id, run
+    /// identity, optional ACP client) from a live session, validating that a
+    /// streaming turn is in progress.
     ///
     /// Pure (no `AppHandle`) so the rejection path is unit-testable without
     /// `tauri::test::mock_app()`, which crashes the Windows test binary
@@ -761,29 +766,38 @@ impl SessionManager {
     #[allow(clippy::type_complexity)]
     pub(super) fn pick_interjection_target(
         s: &LiveSession,
-    ) -> Result<(String, String, String, Option<Arc<AcpClient>>), String> {
+    ) -> Result<(String, String, ActiveRun, Option<Arc<AcpClient>>), String> {
         if !(s.prompt_in_flight || s.fsm.state() == SessionState::Streaming) {
             return Err("interjection requires a streaming turn".into());
         }
-        let turn_id = s
-            .active_turn_id
+        let run = s
+            .active_run
             .clone()
             .ok_or("interjection requires an active turn")?;
         Ok((
             s.backend.clone(),
             s.app_session_id.clone(),
-            turn_id,
+            run,
             s.acp.clone(),
         ))
     }
 
+    /// Whether the run an interjection was accepted for is still the live one.
+    ///
+    /// The epoch matters as much as the turn id: a restart keeps the turn id, so
+    /// checking the id alone would let guidance delivered to a cancelled run
+    /// split the assistant row of the run that replaced it.
     pub(super) fn is_interjection_turn_active(
         s: &LiveSession,
         app_session_id: &str,
-        turn_id: &str,
+        run: &ActiveRun,
     ) -> bool {
         s.app_session_id == app_session_id
-            && s.active_turn_id.as_deref() == Some(turn_id)
+            && run::event_belongs_to_run(
+                s.active_run.as_ref(),
+                Some(&run.turn_id),
+                Some(run.run_epoch),
+            )
             && (s.prompt_in_flight
                 || matches!(
                     s.fsm.state(),
@@ -798,9 +812,9 @@ impl SessionManager {
         app: &AppHandle<R>,
         message: &ChatMessageStored,
         expected_app_session_id: &str,
-        expected_turn_id: &str,
+        expected_run: &ActiveRun,
     ) -> Result<(), String> {
-        if !Self::is_interjection_turn_active(s, expected_app_session_id, expected_turn_id) {
+        if !Self::is_interjection_turn_active(s, expected_app_session_id, expected_run) {
             return Err("interjection turn is no longer active".into());
         }
         Self::maybe_flush_stream_journal(s, true, false);

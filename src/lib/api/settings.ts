@@ -1,5 +1,7 @@
 /** API domain: settings */
 
+import type { SessionSnapshot } from "../session";
+
 import {
   invoke,
   isTauri,
@@ -292,16 +294,58 @@ export async function sessionSetPolicy(
   });
 }
 
-/** Switch live agent model + persist at configured prefs scope. */
+/** What a model switch did to the live session. */
+export type ModelSwitchPlan =
+  | "apply_now"
+  | "defer_to_next_turn"
+  | "restart_current_run";
+
+export interface ModelSwitchOutcome {
+  plan: ModelSwitchPlan;
+  /** Model the in-flight run keeps using. */
+  runningModelId?: string | null;
+  nextModelId?: string | null;
+  restartingTurnId?: string | null;
+}
+
+export interface SetModelResult {
+  prefs: ComposerPrefs;
+  /** Absent when there was no live session to apply the switch to. */
+  switch?: ModelSwitchOutcome | null;
+}
+
+/**
+ * Switch the agent model + persist at the configured prefs scope.
+ *
+ * `scope` defaults to `next_turn`, which never disturbs a running turn. The
+ * returned `switch` reports what actually happened, so a deferred switch is
+ * never presented as if it had already taken effect.
+ */
 export async function sessionSetModel(
   modelId: string,
-  opts?: { projectId?: string | null; sessionId?: string | null },
+  opts?: {
+    projectId?: string | null;
+    sessionId?: string | null;
+    scope?: "next_turn" | "restart_current_turn";
+  },
 ) {
   if (!isTauri()) return null;
-  return invoke<ComposerPrefs>("session_set_model", {
+  return invoke<SetModelResult>("session_set_model", {
     modelId,
     projectId: opts?.projectId ?? null,
     sessionId: opts?.sessionId ?? null,
+    scope: opts?.scope ?? null,
+  });
+}
+
+/**
+ * Re-dispatch the turn already running under the currently selected model.
+ * Keeps one question in history; only the run epoch advances.
+ */
+export async function sessionRestartRun(sessionId?: string | null) {
+  if (!isTauri()) return null;
+  return invoke<SessionSnapshot>("session_restart_run", {
+    sessionId: sessionId ?? null,
   });
 }
 

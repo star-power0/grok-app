@@ -51,10 +51,66 @@ import { useFloatingMenu, type FloatingPos } from "@/lib/floatingMenu";
 
 type Nested = "model" | "effort" | null;
 
+type ModelMenuSnapshot = {
+  modelId: string;
+  effort: string;
+  models: ModelOption[];
+  providers: ComposerProviderInput[];
+  activeSource: string;
+  activeProviderId: string | null;
+  channelEfforts: ComposerModelMenuProps["channelEfforts"];
+  applyNotes?: ComposerModelMenuProps["applyNotes"];
+  labels: ComposerModelMenuProps["labels"];
+};
+
+/**
+ * Deep-copy every input that affects panel geometry at open time.
+ *
+ * Exported for regression tests: the model picker's visible shake came from
+ * account, provider, catalog and locale responses resolving independently while
+ * the panel was open, each one re-measuring and re-anchoring it.
+ */
+export function snapshotModelMenuData(
+  props: Pick<
+    ComposerModelMenuProps,
+    | "modelId"
+    | "effort"
+    | "models"
+    | "providers"
+    | "activeSource"
+    | "activeProviderId"
+    | "channelEfforts"
+    | "applyNotes"
+    | "labels"
+  >,
+): ModelMenuSnapshot {
+  return {
+    modelId: props.modelId,
+    effort: props.effort,
+    models: (props.models ?? GROK_BUILD_MODELS).map((model) => ({
+      ...model,
+      reasoningEfforts: model.reasoningEfforts?.map((item) => ({ ...item })),
+    })),
+    providers: (props.providers ?? []).map((provider) => ({
+      ...provider,
+      models: provider.models?.map((model) => ({ ...model })),
+    })),
+    activeSource: props.activeSource ?? "official",
+    activeProviderId: props.activeProviderId ?? null,
+    channelEfforts: props.channelEfforts?.map((item) => ({ ...item })) ?? null,
+    applyNotes: props.applyNotes
+      ? { ...props.applyNotes }
+      : undefined,
+    labels: { ...props.labels },
+  };
+}
+
 function usePortalMenu(
   estHeight = 220,
   minWidth = 200,
   nestedKey?: string,
+  fitContent = true,
+  width?: number,
 ) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -69,7 +125,8 @@ function usePortalMenu(
     roots: [rootRef],
     onClose: () => setOpen(false),
     placement: "auto",
-    fitContent: true,
+    fitContent,
+    width,
     minWidth,
     estHeight,
     gap: 8,
@@ -132,7 +189,7 @@ function MenuShell({
       ? createPortal(
           <div
             ref={popRef}
-            className="cmm__pop cmm__pop--portal"
+            className={`cmm__pop cmm__pop--portal${className.includes("cmm--model") ? " cmm__pop--model" : ""}`}
             id={popId}
             role="dialog"
             aria-label={ariaLabel}
@@ -155,11 +212,9 @@ function MenuShell({
       aria-controls={popId}
       aria-label={ariaLabel}
       onClick={() => {
-        setOpen((v) => {
-          const next = !v;
-          onOpenChange?.(next);
-          return next;
-        });
+        const next = !open;
+        onOpenChange?.(next);
+        setOpen(next);
       }}
     >
       {triggerIcon ? (
@@ -276,20 +331,44 @@ export function ComposerModelMenu({
 }: ComposerModelMenuProps) {
   const [nested, setNested] = useState<Nested>(null);
   const [modelQuery, setModelQuery] = useState("");
+  const [menuSnapshot, setMenuSnapshot] = useState<ModelMenuSnapshot | null>(
+    null,
+  );
   const modelSearchRef = useRef<HTMLInputElement>(null);
-  /* Wider min so long custom model ids render fully in the root rows. */
-  const menu = usePortalMenu(240, 300, nested ?? "root");
-  const modelList = models.length > 0 ? models : GROK_BUILD_MODELS;
+  /*
+   * Freeze the model catalog while the portal is open. During cold start the
+   * official catalog, provider route and composer prefs resolve independently;
+   * allowing each response to resize/re-anchor this panel is what makes the
+   * picker appear to shake. A fixed-width panel plus a snapshot keeps the
+   * anchor and list stable until the user closes it.
+   */
+  const menu = usePortalMenu(240, 300, nested ?? "root", false, 360);
+  const menuData = menuSnapshot ?? {
+    modelId,
+    effort,
+    models,
+    providers,
+    activeSource,
+    activeProviderId,
+    channelEfforts,
+    applyNotes,
+    labels,
+  };
+  const menuLabels = menuData.labels;
+  const modelList =
+    menuData.models.length > 0 ? menuData.models : GROK_BUILD_MODELS;
   const groups = buildComposerModelGroups({
     officialModels: modelList,
-    providers,
-    officialGroupTitle: labels.modelGroupOfficial,
+    providers: menuData.providers,
+    officialGroupTitle: menuLabels.modelGroupOfficial,
   });
   const filteredGroups = filterComposerModelGroups(groups, modelQuery);
-  const activeModel = findModel(modelId, modelList);
+  const activeModel = findModel(menuData.modelId, modelList);
   const effortCatalog =
-    activeSource === "custom" && channelEfforts && channelEfforts.length > 0
-      ? effortsForModel(null, channelEfforts)
+    menuData.activeSource === "custom" &&
+    menuData.channelEfforts &&
+    menuData.channelEfforts.length > 0
+      ? effortsForModel(null, menuData.channelEfforts)
       : effortsForModel(activeModel);
   /** Ordered UI ladder (3 or 4 slots); spawnId is the real model value. */
   const effortUiList = effortUiOptionsForCatalog(effortCatalog);
@@ -303,12 +382,15 @@ export function ComposerModelMenu({
       onModel(pick.modelId);
     }
     setNested(null);
+    // Selection ends this snapshot so the next open reads the latest route/catalog.
+    menu.setOpen(false);
   };
 
   useEffect(() => {
     if (!menu.open) {
       setNested(null);
       clearModelQuery();
+      setMenuSnapshot(null);
     }
   }, [menu.open]);
 
@@ -359,9 +441,11 @@ export function ComposerModelMenu({
   }, [menu.open, nested]);
 
   const activeCustom =
-    activeSource === "custom" && activeProviderId
+    menuData.activeSource === "custom" && menuData.activeProviderId
       ? (() => {
-          const p = providers.find((x) => x.id === activeProviderId);
+          const p = menuData.providers.find(
+            (x) => x.id === menuData.activeProviderId,
+          );
           if (!p) return null;
           const activeId = p.model?.trim() ?? "";
           const entry =
@@ -373,19 +457,25 @@ export function ComposerModelMenu({
         })()
       : null;
   const activeRequestModel =
-    activeSource === "custom"
-      ? providers.find((x) => x.id === activeProviderId)?.model ?? null
+    menuData.activeSource === "custom"
+      ? menuData.providers.find(
+          (x) => x.id === menuData.activeProviderId,
+        )?.model ?? null
       : null;
-  const officialLabel = activeModel?.label ?? modelId;
+  const officialLabel = activeModel?.label ?? menuData.modelId;
   const modelLabel = composerModelChipLabel({
-    modelId,
+    modelId: menuData.modelId,
     officialLabel,
     activeCustom,
   });
-  const eLabel = resolveEffortLabel(effort, effortCatalog, labels);
+  const eLabel = resolveEffortLabel(
+    menuData.effort,
+    effortCatalog,
+    menuLabels,
+  );
   // Compact trigger: model + short effort (locale), no middle-dot noise.
   const triggerText = `${modelLabel} ${eLabel}`;
-  const title = `${labels.model}: ${modelLabel} · ${labels.effort}: ${eLabel}`;
+  const title = `${menuLabels.model}: ${modelLabel} · ${menuLabels.effort}: ${eLabel}`;
 
   return (
     <MenuShell
@@ -394,13 +484,28 @@ export function ComposerModelMenu({
       triggerIcon={<IconBolt size={14} />}
       triggerText={triggerText}
       triggerShort={eLabel}
-      ariaLabel={labels.model}
+      ariaLabel={menuLabels.model}
       title={title}
       onOpenChange={(o) => {
-        if (!o) {
-          setNested(null);
-          clearModelQuery();
+        if (o) {
+          setMenuSnapshot(
+            snapshotModelMenuData({
+              modelId,
+              effort,
+              models,
+              providers,
+              activeSource,
+              activeProviderId,
+              channelEfforts,
+              applyNotes,
+              labels,
+            }),
+          );
+          return;
         }
+        setNested(null);
+        clearModelQuery();
+        setMenuSnapshot(null);
       }}
     >
       {nested === null ? (
@@ -410,7 +515,7 @@ export function ComposerModelMenu({
             className="cmm__row"
             onClick={() => setNested("model")}
           >
-            <span>{labels.model}</span>
+            <span>{menuLabels.model}</span>
             <span className="cmm__row-val">
               <span className="cmm__row-val-text" title={modelLabel}>
                 {modelLabel}
@@ -423,7 +528,7 @@ export function ComposerModelMenu({
             className="cmm__row"
             onClick={() => setNested("effort")}
           >
-            <span>{labels.effort}</span>
+            <span>{menuLabels.effort}</span>
             <span className="cmm__row-val">
               <span className="cmm__row-val-text">{eLabel}</span>
               <IconChevronRight size={14} />
@@ -437,13 +542,13 @@ export function ComposerModelMenu({
             className="cmm__back"
             onClick={() => setNested(null)}
           >
-            {nested === "model" ? labels.model : labels.effort}
+            {nested === "model" ? menuLabels.model : menuLabels.effort}
           </button>
           {nested === "model" &&
             (groups.length === 0 ? (
               <div className="cmm__opt cmm__opt--muted" role="status">
                 <span className="cmm__opt-main">
-                  <span className="cmm__opt-title">{modelId || "—"}</span>
+                  <span className="cmm__opt-title">{menuData.modelId || "—"}</span>
                 </span>
               </div>
             ) : (
@@ -455,8 +560,8 @@ export function ComposerModelMenu({
                     className="cmm__search-input"
                     value={modelQuery}
                     onChange={(e) => setModelQuery(e.target.value)}
-                    placeholder={labels.modelSearchPlaceholder}
-                    aria-label={labels.modelSearchPlaceholder}
+                    placeholder={menuLabels.modelSearchPlaceholder}
+                    aria-label={menuLabels.modelSearchPlaceholder}
                     autoComplete="off"
                     spellCheck={false}
                     // Keep menu open / avoid accidental form submit.
@@ -469,7 +574,7 @@ export function ComposerModelMenu({
                   <div className="cmm__opt cmm__opt--muted" role="status">
                     <span className="cmm__opt-main">
                       <span className="cmm__opt-title">
-                        {labels.modelSearchEmpty}
+                        {menuLabels.modelSearchEmpty}
                       </span>
                     </span>
                   </div>
@@ -479,10 +584,10 @@ export function ComposerModelMenu({
                       <div className="cmm__section">{group.title}</div>
                       {group.entries.map((entry) => {
                         const active = isComposerModelEntryActive(entry, {
-                          activeSource,
-                          activeProviderId,
+                          activeSource: menuData.activeSource,
+                          activeProviderId: menuData.activeProviderId,
                           activeRequestModel,
-                          modelId,
+                          modelId: menuData.modelId,
                         });
                         return (
                           <button
@@ -517,8 +622,8 @@ export function ComposerModelMenu({
           {nested === "effort" &&
             effortUiList.map((e) => {
               const active =
-                e.spawnId === effort ||
-                spawnIdToEffortUiSlot(effort, effortCatalog) === e.uiId;
+                e.spawnId === menuData.effort ||
+                spawnIdToEffortUiSlot(menuData.effort, effortCatalog) === e.uiId;
               return (
                 <button
                   key={e.uiId}
@@ -531,7 +636,7 @@ export function ComposerModelMenu({
                 >
                   <span className="cmm__opt-main">
                     <span className="cmm__opt-title">
-                      {effortDisplayLabel(e.uiId, effortI18n(labels))}
+                      {effortDisplayLabel(e.uiId, effortI18n(menuLabels))}
                     </span>
                   </span>
                   {active ? (
@@ -542,14 +647,14 @@ export function ComposerModelMenu({
                 </button>
               );
             })}
-          {nested === "model" && applyNotes?.model ? (
+          {nested === "model" && menuData.applyNotes?.model ? (
             <div className="cmm__apply-note" role="note">
-              {applyNotes.model}
+              {menuData.applyNotes.model}
             </div>
           ) : null}
-          {nested === "effort" && applyNotes?.effort ? (
+          {nested === "effort" && menuData.applyNotes?.effort ? (
             <div className="cmm__apply-note" role="note">
-              {applyNotes.effort}
+              {menuData.applyNotes.effort}
             </div>
           ) : null}
         </div>

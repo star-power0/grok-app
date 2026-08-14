@@ -6,6 +6,8 @@ import {
 
 // ── Custom providers (agent-home config.toml) ───────────────────────────────
 
+import type { ModelCapabilities } from "../modelCapabilities";
+
 export interface ProviderModelEntry {
   /** Upstream request body model id. */
   id: string;
@@ -16,6 +18,11 @@ export interface ProviderModelEntry {
    * default (`CustomProvider.supportsVision` / `[model.<id>].supports_vision`).
    */
   supportsVision?: boolean;
+  /**
+   * Optional explicit input/continuation profile. Omitted records retain the
+   * persisted `supportsVision` behavior for backwards compatibility.
+   */
+  capabilities?: ModelCapabilities;
 }
 
 export interface ProviderEffortEntry {
@@ -280,6 +287,7 @@ export async function providersUpsert(body: {
   setAsDefault?: boolean;
   createOnly?: boolean;
   supportsVision?: boolean;
+  capabilities?: ModelCapabilities;
   models?: ProviderModelEntry[];
   efforts?: ProviderEffortEntry[];
 }) {
@@ -293,6 +301,7 @@ export async function providersUpsert(body: {
     setAsDefault: body.setAsDefault ?? null,
     createOnly: body.createOnly ?? null,
     supportsVision: body.supportsVision ?? null,
+    capabilities: body.capabilities ?? null,
     models: body.models ?? null,
     efforts: body.efforts ?? null,
   });

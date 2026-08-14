@@ -322,6 +322,8 @@ impl SessionManager {
         }
 
         // Fresh process id per connect (each App session owns its ACP child).
+        // Old MCP health belongs to the retired child and must not survive a reconnect.
+        self.mcp_runtime.lock().remove(&meta.id);
         let process_id = Uuid::new_v4().to_string();
         {
             let mut fsm = SessionFsm::new();
@@ -344,6 +346,9 @@ impl SessionManager {
                 stream_attachments: Vec::new(),
                 model_id: Some(agent_model.clone()),
                 pending_model: None,
+                active_run: None,
+                run_epoch_seq: 0,
+                active_run_prompt: None,
                 effort: Some(prefs.effort.clone()),
                 product_mode: Some(prefs.mode.clone()),
                 project_path: project_path.clone(),
@@ -706,6 +711,9 @@ impl SessionManager {
             stream_attachments: Vec::new(),
             model_id: p.model_id,
             pending_model: None,
+            active_run: None,
+            run_epoch_seq: 0,
+            active_run_prompt: None,
             effort: p.effort,
             product_mode: p.product_mode,
             project_path: p.project_path,
@@ -757,6 +765,10 @@ impl SessionManager {
             AcpEvent::Stderr { .. } => "stderr",
             AcpEvent::HookActivity { .. } => "hook_activity",
             AcpEvent::GoalUpdated { .. } => "goal_updated",
+            AcpEvent::McpInitProgress { .. } => "mcp_init_progress",
+            AcpEvent::McpInitialized => "mcp_initialized",
+            AcpEvent::McpServerStatus { .. } => "mcp_server_status",
+            AcpEvent::McpCatalogStale { .. } => "mcp_catalog_stale",
         }
     }
 
@@ -874,6 +886,9 @@ mod connect_preserve_tests {
             stream_attachments: Vec::new(),
             model_id: None,
             pending_model: None,
+            active_run: None,
+            run_epoch_seq: 0,
+            active_run_prompt: None,
             effort: None,
             product_mode: None,
             project_path: Some("/tmp".into()),

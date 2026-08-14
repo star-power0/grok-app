@@ -362,6 +362,9 @@ mod tests {
             is_error: false,
             attachments: None,
             marker: marker.map(str::to_string),
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         };
         let messages = vec![
             message("user", "12345678", None),
@@ -383,6 +386,9 @@ mod tests {
             is_error: false,
             attachments: None,
             marker: Some("context_compact".into()),
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         };
         let (_, compact) = latest_compact_from_messages(&[message]).expect("compact marker");
         assert_eq!(compact.trigger, "manual");

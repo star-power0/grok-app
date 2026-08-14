@@ -838,6 +838,9 @@ mod tests {
                 is_error: false,
                 attachments: None,
                 marker: None,
+                tool_artifact_ref: None,
+                tool_output_bytes: None,
+                tool_detail_truncated: false,
             },
         )
         .expect("append");

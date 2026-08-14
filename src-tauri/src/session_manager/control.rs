@@ -7,10 +7,11 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use crate::acp_client::{AcpClient, AskUserOutcome, PermissionOutcome};
+use crate::context_compatibility::ContextCompatibilityInput;
 use crate::permission::PermissionPolicy;
 use crate::process_limits::{normalize_idle_minutes, normalize_max_concurrent};
 use crate::session_fsm::SessionState;
-use crate::store::{self};
+use crate::store::{self, MessageAttachmentStored};
 
 use super::*;
 
@@ -187,7 +188,7 @@ impl SessionManager {
                 s.stream_attachments.clear();
                 s.journal_throttle.reset();
                 s.streaming_message_id = None;
-                s.active_turn_id = None;
+                Self::close_run_locked(s);
                 s.stream_message_id_locked = false;
                 s.open_tool_ids.clear();
                 s.terminal_tool_ids.clear();
@@ -279,14 +280,33 @@ impl SessionManager {
     }
 
     /// Apply model id on the live ACP session (best-effort session/set_model).
+    ///
+    /// Defaults to next-turn scope: an in-flight run keeps the model it froze at
+    /// dispatch. See `set_model_scoped` for the explicit restart path.
     pub async fn set_model(&self, model_id: String) -> Result<(), String> {
+        self.set_model_scoped(model_id, ModelSwitchScope::NextTurn)
+            .await
+            .map(|_| ())
+    }
+
+    /// Apply model id and report what actually happened.
+    ///
+    /// The in-flight run is never silently re-pointed. When a run is busy the
+    /// switch becomes the next turn's default and the caller learns which model
+    /// is still running, so the UI can say "this answer is still from X" instead
+    /// of showing the new model as if it had taken effect.
+    pub async fn set_model_scoped(
+        &self,
+        model_id: String,
+        scope: ModelSwitchScope,
+    ) -> Result<ModelSwitchOutcome, String> {
         let model_id = model_id.trim().to_string();
         if model_id.is_empty() {
             return Err("model id empty".into());
         }
         // Store composer preference; agent receives channel-resolved id.
         let agent_model = crate::providers::agent_spawn_model_id(&model_id);
-        let (acp, busy) = {
+        let (acp, plan, running_model_id, restarting_turn_id) = {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 s.model_id = Some(model_id.clone());
@@ -295,24 +315,158 @@ impl SessionManager {
                 // A retrying agent can hold its RPC queue for tens of seconds.
                 // Defer the live switch to the next prompt instead of making the
                 // model picker (and every caller) block behind that retry loop.
-                let busy = s.prompt_in_flight
-                    || s.fsm.state() == SessionState::Streaming
-                    || s.fsm.state() == SessionState::AwaitingPermission;
-                if busy {
+                let plan = run::plan_model_switch(Self::run_is_busy_locked(s), scope);
+                if plan != ModelSwitchPlan::ApplyNow {
                     s.pending_model = Some(agent_model.clone());
                 }
-                (s.acp.clone(), busy)
+                let running = s
+                    .active_run
+                    .as_ref()
+                    .and_then(|run| run.config.model_id.clone());
+                let restart_turn = if plan == ModelSwitchPlan::RestartCurrentRun {
+                    s.active_run.as_ref().map(|run| run.turn_id.clone())
+                } else {
+                    None
+                };
+                (s.acp.clone(), plan, running, restart_turn)
             } else {
-                (None, false)
+                (None, ModelSwitchPlan::ApplyNow, None, None)
             }
         };
-        if busy {
-            return Ok(());
+        if plan == ModelSwitchPlan::ApplyNow {
+            if let Some(acp) = acp {
+                acp.set_model(&agent_model).await?;
+            }
+            // Applied live: clear the deferral so the next turn does not re-send it.
+            if let Some(s) = self.inner.lock().as_mut() {
+                s.pending_model = None;
+            }
         }
-        if let Some(acp) = acp {
-            acp.set_model(&agent_model).await?;
+        Ok(ModelSwitchOutcome {
+            plan,
+            running_model_id,
+            next_model_id: Some(model_id),
+            restarting_turn_id,
+        })
+    }
+
+    /// Run the context compatibility preflight and publish its findings.
+    ///
+    /// Advisory by design: this reports what the target model cannot faithfully
+    /// consume so the UI can warn or offer an explicit choice. It does not
+    /// rewrite the prompt, drop attachments, or convert media — silent
+    /// degradation is exactly the failure mode this exists to prevent.
+    ///
+    /// Host vision already provides a sanctioned, visible degradation for
+    /// text-only mains, so an image finding is downgraded to a warning when that
+    /// path will run; anything Host vision does not cover stays a blocker-level
+    /// finding for the UI to present.
+    pub(super) fn emit_context_compatibility(
+        &self,
+        app: &AppHandle,
+        session_id: Option<&str>,
+        attachments: Option<&[MessageAttachmentStored]>,
+    ) {
+        let Some(items) = attachments.filter(|items| !items.is_empty()) else {
+            return;
+        };
+        let (app_sid, model_id) = {
+            let guard = self.inner.lock();
+            match guard.as_ref() {
+                Some(s) if session_id.is_none_or(|t| t == s.app_session_id) => {
+                    (s.app_session_id.clone(), s.model_id.clone())
+                }
+                _ => return,
+            }
+        };
+        let target = crate::context_compatibility::resolve_target_capabilities(model_id.as_deref());
+        let pending = items
+            .iter()
+            .map(|a| {
+                crate::context_compatibility::ContextAttachment::from_stored(&a.path, a.is_dir)
+            })
+            .collect();
+        let result = crate::context_compatibility::validate_context_compatibility(
+            &ContextCompatibilityInput {
+                action: crate::context_compatibility::CompatibilityAction::Send,
+                target,
+                current_provider_id: None,
+                pending_attachments: pending,
+                history_attachments: vec![],
+                tool_causal_groups: vec![],
+                provider_bound_continuations: vec![],
+            },
+        );
+        if result.blockers.is_empty() && result.warnings.is_empty() {
+            return;
         }
-        Ok(())
+        tracing::info!(
+            target: "session",
+            session = %app_sid,
+            blockers = result.blockers.len(),
+            warnings = result.warnings.len(),
+            "context compatibility preflight produced findings"
+        );
+        let _ = app.emit(
+            "session://context_compatibility",
+            serde_json::json!({
+                "sessionId": app_sid,
+                "modelId": model_id,
+                "blockers": result.blockers,
+                "warnings": result.warnings,
+            }),
+        );
+    }
+
+    /// Interrupt the active run and re-dispatch the same user turn under the
+    /// current (already-updated) model.
+    ///
+    /// The turn id is preserved so history stays one question; only `runEpoch`
+    /// advances. Events still in flight from the previous epoch are dropped by
+    /// `event_belongs_to_run` rather than merged into the new attempt.
+    pub async fn restart_active_run(
+        self: &Arc<Self>,
+        app: AppHandle,
+        session_id: Option<String>,
+    ) -> Result<SessionSnapshot, String> {
+        let target = match session_id {
+            Some(sid) => sid,
+            None => self
+                .inner
+                .lock()
+                .as_ref()
+                .map(|s| s.app_session_id.clone())
+                .ok_or("no active session")?,
+        };
+        let (run, prompt) = self
+            .with_session_mut(&target, |s| {
+                let run = s.active_run.clone()?;
+                let prompt = s.active_run_prompt.clone()?;
+                Some((run, prompt))
+            })
+            .flatten()
+            .ok_or("no restartable run for this chat")?;
+
+        // Cancel the old attempt first: two live runs on one agent would
+        // interleave output into a single assistant row.
+        self.stop(app.clone(), Some(target.clone())).await?;
+        tracing::info!(
+            target: "session",
+            session = %target,
+            turn = %run.turn_id,
+            from_epoch = run.run_epoch,
+            reason = ?RunSupersedeReason::ConfigRestart,
+            "restarting run under the newly selected model"
+        );
+        self.dispatch_turn(
+            app,
+            prompt.text,
+            prompt.display_text,
+            prompt.attachments,
+            Some(target),
+            Some(run.turn_id),
+        )
+        .await
     }
 
     /// Apply product mode via session/set_mode; soft-respawn if agent rejects.

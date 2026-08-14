@@ -424,6 +424,28 @@ export async function skillCreate(opts: {
 }
 
 /** List MCP servers via `grok inspect --json` (optional project cwd). */
+/** Canonical MCP catalog (same source ACP session injection uses). */
+export interface McpCatalogResult {
+  servers: Array<
+    McpDto & {
+      scope?: string | null;
+      configEnabled?: boolean | null;
+    }
+  >;
+  source?: string;
+  error?: string;
+}
+
+/**
+ * Read configured MCP servers. Reports configuration only — health comes from
+ * live `mcp://` session events, so this never starts a server.
+ */
+export async function mcpCatalog(projectPath?: string | null) {
+  return invoke<McpCatalogResult>("mcp_catalog", {
+    projectPath: projectPath ?? null,
+  });
+}
+
 export async function inspectMcp(projectPath?: string | null) {
   return invoke<InspectMcpResult>("inspect_mcp", {
     projectPath: projectPath ?? null,

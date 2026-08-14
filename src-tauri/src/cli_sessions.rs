@@ -1299,6 +1299,9 @@ pub fn reconcile_journal_from_chat_history(
                     is_error: false,
                     attachments: None,
                     marker: None,
+                    tool_artifact_ref: None,
+                    tool_output_bytes: None,
+                    tool_detail_truncated: false,
                 });
                 changed += 1;
             }
@@ -1416,6 +1419,9 @@ pub fn import_cli_session(
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         })
         .collect();
     store::save_messages(&meta.id, &msgs)?;
@@ -1639,6 +1645,9 @@ mod tests {
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         }];
         let pairs = vec![(
             "user".into(),
@@ -1668,6 +1677,9 @@ mod tests {
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         }];
         assert_eq!(
             journal_covers_assistant(&journal, "基于已有调研，产出矩阵。"),
@@ -1694,6 +1706,9 @@ mod tests {
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         }];
         assert_eq!(
             journal_covers_assistant(&full, "基于已有调研，产出矩阵。"),

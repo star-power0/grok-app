@@ -8,6 +8,32 @@ import {
 import type { SessionSnapshot } from "../session";
 import { IDLE_SNAPSHOT } from "../session";
 
+export interface McpRuntimeServer {
+  name: string;
+  status: string;
+  reason?: string | null;
+  toolCount?: number | null;
+  observedAt?: string | null;
+}
+
+export interface McpRuntimeSnapshot {
+  sessionId?: string | null;
+  /** ACP child generation; changes invalidate old health for the same chat. */
+  processId?: string | null;
+  initialized?: boolean;
+  connected?: number | null;
+  total?: number | null;
+  catalogStale?: boolean;
+  servers?: McpRuntimeServer[];
+  source?: string;
+}
+
+export async function sessionMcpRuntime(
+  sessionId?: string | null,
+): Promise<McpRuntimeSnapshot | null> {
+  return invoke("session_mcp_runtime", { sessionId: sessionId ?? null });
+}
+
 export async function sessionGetState(): Promise<SessionSnapshot> {
   if (isMirrorClient()) return invoke("session_get_state");
   if (!isTauri()) return { ...IDLE_SNAPSHOT, backend: "browser" };
@@ -84,6 +110,23 @@ export async function sessionInterject(
     attachments: attachments?.length ? attachments : null,
     sessionId: sessionId ?? null,
   });
+}
+
+/** Access-controlled complete output for a persisted tool invocation. */
+export type SessionToolArtifact = {
+  content: string;
+  truncated?: boolean;
+  outputBytes?: number;
+};
+
+/**
+ * Read a Host-owned tool artifact. The opaque ref is emitted only for the
+ * current session's tool row; callers must never construct filesystem paths.
+ */
+export async function sessionToolArtifact(
+  artifactRef: string,
+): Promise<SessionToolArtifact> {
+  return invoke("session_tool_artifact", { artifactRef });
 }
 
 /**

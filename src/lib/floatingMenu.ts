@@ -376,19 +376,9 @@ export function useFloatingMenu({
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
 
-    // Re-anchor when panel content height changes (e.g. filter shrinks from
-    // 50 rows to 3 — must drop back down to sit on the input, not stay at top).
-    let ro: ResizeObserver | null = null;
-    const panel = panelRef.current;
-    if (typeof ResizeObserver !== "undefined" && panel) {
-      ro = new ResizeObserver(() => update(true));
-      ro.observe(panel);
-    }
-
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
-      ro?.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -404,17 +394,51 @@ export function useFloatingMenu({
     ...deps,
   ]);
 
-  // Second pass: panel mounted — measure real size + settle.
+  // Second pass: the portal panel now exists. Observe both it and the trigger
+  // here (not in the first open pass, where the portal ref is still null).
   useLayoutEffect(() => {
-    if (!open || !pos) return;
-    if (!panelRef.current) return;
+    if (!open || !pos || !panelRef.current) return;
+    let frame: number | null = null;
+    const scheduleUpdate = () => {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update(true);
+      });
+    };
     update(true);
-    if (!settledRef.current && panelRef.current) {
+    let panelObserver: ResizeObserver | null = null;
+    let triggerObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      panelObserver = new ResizeObserver(scheduleUpdate);
+      panelObserver.observe(panelRef.current);
+      triggerObserver = new ResizeObserver(scheduleUpdate);
+      const trigger = triggerRef.current;
+      if (trigger) {
+        // A trigger can move without resizing when an outer flex layout hydrates
+        // (welcome mark/context chips). Observe its layout ancestors as well as
+        // the button: a size change on one of them remeasures the actual rect.
+        // Stop before body so unrelated page activity cannot churn this menu.
+        let node: HTMLElement | null = trigger;
+        let observed = 0;
+        while (node && node !== document.body && observed < 8) {
+          triggerObserver.observe(node);
+          node = node.parentElement;
+          observed += 1;
+        }
+      }
+    }
+    if (!settledRef.current) {
       settledRef.current = true;
       setSettled(true);
     }
+    return () => {
+      if (frame != null) cancelAnimationFrame(frame);
+      panelObserver?.disconnect();
+      triggerObserver?.disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, !!pos, panelRef]);
+  }, [open, !!pos, panelRef, triggerRef]);
 
   // Re-anchor when host reports content change (filter query / entry count).
   useLayoutEffect(() => {

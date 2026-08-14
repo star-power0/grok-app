@@ -25,6 +25,7 @@ mod events;
 mod events_bg;
 mod journal;
 mod process;
+mod run;
 mod stream;
 mod turn;
 mod types;
@@ -43,9 +44,14 @@ use parking_lot::Mutex;
 
 use crate::session_fsm::SessionState;
 
+use run::{ModelSwitchPlan, RunSupersedeReason};
 use types::*;
 
-pub use types::{RewindExecuteResult, RewindPointDto, SessionSnapshot, UiPermissionRequest};
+pub use run::{ModelSwitchOutcome, ModelSwitchScope};
+pub use types::{
+    McpRuntimeServer, McpRuntimeSnapshot, RewindExecuteResult, RewindPointDto, SessionSnapshot,
+    UiPermissionRequest,
+};
 
 pub struct SessionManager {
     /// Currently focused live session (UI-bound for send).
@@ -59,6 +65,9 @@ pub struct SessionManager {
     /// successful command RPC result. The latter is required because the CLI
     /// reports manual compact completion as an extension RPC, not session/update.
     pub(super) manual_compact_pending: Mutex<HashSet<String>>,
+    /// Last MCP lifecycle state per app session. Events can arrive before the
+    /// WebView installs its listeners, so runtime health must be replayable.
+    pub(super) mcp_runtime: Mutex<HashMap<String, McpRuntimeSnapshot>>,
     /// Serialize connect / park / unpark so openSession prefetch cannot race first send.
     pub(super) connect_lock: tokio::sync::Mutex<()>,
 }
@@ -76,6 +85,7 @@ impl SessionManager {
             background: Mutex::new(HashMap::new()),
             parked: Mutex::new(HashMap::new()),
             manual_compact_pending: Mutex::new(HashSet::new()),
+            mcp_runtime: Mutex::new(HashMap::new()),
             connect_lock: tokio::sync::Mutex::new(()),
         }
     }

@@ -157,7 +157,7 @@ impl SessionManager {
     pub(super) fn release_failed_turn_markers(s: &mut LiveSession) {
         s.prompt_in_flight = false;
         s.streaming_message_id = None;
-        s.active_turn_id = None;
+        Self::close_run_locked(s);
         s.stream_message_id_locked = false;
         s.stream_buf.clear();
         s.stream_thought.clear();
@@ -353,6 +353,9 @@ impl SessionManager {
             stream_attachments: Vec::new(),
             model_id: parked.model_id,
             pending_model: None,
+            active_run: None,
+            run_epoch_seq: 0,
+            active_run_prompt: None,
             effort: parked.effort,
             product_mode: parked.product_mode,
             project_path: parked.project_path,
@@ -693,6 +696,201 @@ impl SessionManager {
         }
     }
 
+    pub fn mcp_runtime_snapshot(&self, session_id: Option<&str>) -> Option<McpRuntimeSnapshot> {
+        let id = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.snapshot().session_id)?;
+        self.mcp_runtime.lock().get(&id).cloned()
+    }
+
+    pub async fn mcp_runtime_current(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<McpRuntimeSnapshot> {
+        let id = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.snapshot().session_id)?;
+        let mut snapshot = self
+            .mcp_runtime_snapshot(Some(&id))
+            .unwrap_or(McpRuntimeSnapshot {
+                session_id: Some(id.clone()),
+                source: "snapshot".into(),
+                ..Default::default()
+            });
+        // A viewed session can be parked while another chat owns the live slot.
+        // Its cached snapshot is still valid, and its warm ACP can still answer a
+        // read-only cache query. Clone the client under short locks; never hold a
+        // session map lock across the RPC await.
+        let runtime = {
+            let live = self
+                .inner
+                .lock()
+                .as_ref()
+                .filter(|session| session.app_session_id == id)
+                .and_then(|session| {
+                    session
+                        .acp
+                        .clone()
+                        .map(|acp| (session.process_id.clone(), acp))
+                });
+            if live.is_some() {
+                live
+            } else {
+                let background = self.background.lock().get(&id).and_then(|session| {
+                    session
+                        .acp
+                        .clone()
+                        .map(|acp| (session.process_id.clone(), acp))
+                });
+                if background.is_some() {
+                    background
+                } else {
+                    self.parked
+                        .lock()
+                        .get(&id)
+                        .map(|session| (session.process_id.clone(), session.acp.clone()))
+                }
+            }
+        };
+        let Some((process_id, acp)) = runtime else {
+            return Some(snapshot);
+        };
+        if snapshot.process_id.as_deref() != Some(process_id.as_str()) {
+            snapshot = McpRuntimeSnapshot {
+                session_id: Some(id.clone()),
+                process_id: Some(process_id.clone()),
+                source: "snapshot".into(),
+                ..Default::default()
+            };
+        }
+        let cache_requested_at = chrono::Utc::now();
+        let Ok(raw) = acp.mcp_list_cached().await else {
+            return Some(snapshot);
+        };
+        // The request can outlive an ACP reconnect. A reply from the retired
+        // child must never repopulate a cache that `connect` deliberately cleared.
+        let active_process_id = {
+            let live = self
+                .inner
+                .lock()
+                .as_ref()
+                .filter(|session| session.app_session_id == id)
+                .map(|session| session.process_id.clone());
+            if live.is_some() {
+                live
+            } else {
+                let background = self
+                    .background
+                    .lock()
+                    .get(&id)
+                    .map(|session| session.process_id.clone());
+                if background.is_some() {
+                    background
+                } else {
+                    self.parked
+                        .lock()
+                        .get(&id)
+                        .map(|session| session.process_id.clone())
+                }
+            }
+        };
+        if active_process_id.as_deref() != Some(process_id.as_str()) {
+            return self.mcp_runtime_snapshot(Some(&id));
+        }
+        let mut merged = self
+            .mcp_runtime_snapshot(Some(&id))
+            .filter(|current| current.process_id.as_deref() == Some(process_id.as_str()))
+            .unwrap_or(snapshot);
+        merged.source = "merged".into();
+        for entry in raw
+            .get("servers")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(name) = entry
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            // Current Grok Build returns these fields at the server entry level;
+            // some older relay builds wrap them under `session`. Accept both so
+            // cached-list replay never turns a real ready row into `unknown`.
+            let session = entry.get("session");
+            let field = |name: &str| {
+                entry
+                    .get(name)
+                    .or_else(|| session.and_then(|value| value.get(name)))
+            };
+            let enabled = field("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            let auth_required = field("authRequired")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let setup_required = field("setupRequired")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let listed_status = if !enabled {
+                Some("disabled".to_string())
+            } else if auth_required || setup_required {
+                // The GUI has one actionable non-ready badge for credentials and
+                // provider setup. Never inflate either condition to `ready`.
+                Some("needsAuth".to_string())
+            } else {
+                field("status")
+                    .and_then(|value| value.as_str())
+                    .map(crate::acp_client::normalize_mcp_status)
+                    .map(str::to_string)
+            };
+            let listed_tool_count = field("toolCount")
+                .and_then(|value| value.as_u64())
+                .or_else(|| {
+                    field("tools")
+                        .and_then(|value| value.as_array())
+                        .map(|items| items.len() as u64)
+                })
+                .and_then(|count| u32::try_from(count).ok());
+            if let Some(existing) = merged.servers.iter_mut().find(|item| item.name == name) {
+                // An incomplete cached-list response must not erase a richer
+                // server-status event (especially its redacted failure reason).
+                // Likewise, an event that landed while this cache request was
+                // in flight is newer evidence than the list request started
+                // before it, so keep that status and only enrich tool metadata.
+                let observed_after_request =
+                    chrono::DateTime::parse_from_rfc3339(&existing.observed_at)
+                        .map(|observed| observed.with_timezone(&chrono::Utc) > cache_requested_at)
+                        .unwrap_or(false);
+                if let Some(status) = listed_status {
+                    if !observed_after_request {
+                        existing.status = status;
+                        existing.observed_at = cache_requested_at.to_rfc3339();
+                    }
+                }
+                if listed_tool_count.is_some() {
+                    existing.tool_count = listed_tool_count;
+                }
+            } else {
+                merged.servers.push(McpRuntimeServer {
+                    name: name.to_string(),
+                    status: listed_status.unwrap_or_else(|| "unknown".to_string()),
+                    reason: None,
+                    tool_count: listed_tool_count,
+                    observed_at: cache_requested_at.to_rfc3339(),
+                });
+            }
+        }
+        self.mcp_runtime.lock().insert(id, merged.clone());
+        Some(merged)
+    }
+
     pub fn snapshot(&self) -> SessionSnapshot {
         let guard = self.inner.lock();
         match guard.as_ref() {
@@ -706,18 +904,13 @@ impl SessionManager {
                 model_id: None,
                 project_path: None,
                 title: String::new(),
+                active_turn_id: None,
+                active_run_epoch: None,
+                running_model_id: None,
+                model_switch_pending: false,
+                can_restart_active_run: false,
             },
-            Some(s) => SessionSnapshot {
-                session_id: Some(s.app_session_id.clone()),
-                agent_session_id: s.meta.agent_session_id.clone(),
-                state: s.fsm.state(),
-                last_error: s.fsm.last_error().cloned(),
-                streaming_message_id: s.streaming_message_id.clone(),
-                backend: s.backend.clone(),
-                model_id: s.model_id.clone(),
-                project_path: s.project_path.clone(),
-                title: s.meta.title.clone(),
-            },
+            Some(s) => Self::snapshot_from_live(s),
         }
     }
 
@@ -831,6 +1024,17 @@ impl SessionManager {
     }
 
     pub(super) fn snapshot_from_live(s: &LiveSession) -> SessionSnapshot {
+        // The run's frozen model is what produced the output on screen; the
+        // session's `model_id` is what the *next* turn will use. Reporting only
+        // one of them is what made a deferred switch look already applied.
+        let running_model_id = s
+            .active_run
+            .as_ref()
+            .and_then(|run| run.config.model_id.clone());
+        let model_switch_pending = match (&running_model_id, &s.model_id) {
+            (Some(running), Some(next)) => running != next,
+            _ => s.pending_model.is_some(),
+        };
         SessionSnapshot {
             session_id: Some(s.app_session_id.clone()),
             agent_session_id: s.meta.agent_session_id.clone(),
@@ -841,6 +1045,35 @@ impl SessionManager {
             model_id: s.model_id.clone(),
             project_path: s.project_path.clone(),
             title: s.meta.title.clone(),
+            active_turn_id: s.active_run.as_ref().map(|run| run.turn_id.clone()),
+            active_run_epoch: s.active_run.as_ref().map(|run| run.run_epoch),
+            running_model_id,
+            model_switch_pending,
+            can_restart_active_run: s.active_run.is_some() && s.active_run_prompt.is_some(),
+        }
+    }
+
+    /// Minimal runtime snapshot for `session://runtime` when only the session id
+    /// and state are known (background lifecycle / stall recovery paths).
+    ///
+    /// Reports no run identity on purpose: a caller that cannot see the session
+    /// must not assert whether a run is in flight.
+    pub(super) fn runtime_snapshot(session_id: String, state: SessionState) -> SessionSnapshot {
+        SessionSnapshot {
+            session_id: Some(session_id),
+            agent_session_id: None,
+            state,
+            last_error: None,
+            streaming_message_id: None,
+            backend: Self::backend_name(),
+            model_id: None,
+            project_path: None,
+            title: String::new(),
+            active_turn_id: None,
+            active_run_epoch: None,
+            running_model_id: None,
+            model_switch_pending: false,
+            can_restart_active_run: false,
         }
     }
 
@@ -855,6 +1088,11 @@ impl SessionManager {
             model_id: p.model_id.clone(),
             project_path: p.project_path.clone(),
             title: p.meta.title.clone(),
+            active_turn_id: None,
+            active_run_epoch: None,
+            running_model_id: None,
+            model_switch_pending: false,
+            can_restart_active_run: false,
         }
     }
 
@@ -887,6 +1125,9 @@ impl SessionManager {
                 is_error: true,
                 attachments: None,
                 marker: None,
+                tool_artifact_ref: None,
+                tool_output_bytes: None,
+                tool_detail_truncated: false,
             },
         );
         s.meta.updated_at = chrono::Utc::now();

@@ -63,6 +63,10 @@ mod side_browser_host;
 
 mod commands;
 
+mod context_compatibility;
+
+mod model_capabilities;
+
 mod editors;
 
 mod error;
@@ -151,6 +155,8 @@ mod skill_edit;
 mod store;
 
 mod store_lock;
+
+mod tool_artifacts;
 
 mod stream_emit;
 
@@ -640,11 +646,17 @@ pub fn run() {
 
             commands::session_get_state,
 
+            commands::session_mcp_runtime,
+
             commands::session_connect,
 
             commands::session_send,
 
+            commands::session_restart_run,
+
             commands::session_interject,
+
+            commands::session_tool_artifact,
 
             commands::session_stop,
 
@@ -905,6 +917,8 @@ pub fn run() {
             commands::agents_scaffold,
 
             commands::inspect_mcp,
+
+            commands::mcp_catalog,
 
             commands::project_inspect,
 

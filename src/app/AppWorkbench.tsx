@@ -250,6 +250,18 @@ import {
 } from "@/lib/sandboxProfile";
 import { shouldRestoreLastSession } from "@/lib/sessionRestore";
 import {
+  applyMcpCatalog,
+  applyMcpCatalogStale,
+  applyMcpInitProgress,
+  beginMcpRuntimeSession,
+  applyMcpRuntimeSnapshot,
+  applyMcpInitialized,
+  applyMcpServerStatus,
+  EMPTY_MCP_SCOPE,
+  shouldRefreshMcpCatalog,
+  type McpScopeState
+} from "@/lib/mcpRuntime";
+import {
   archiveAgeEmptyMessageKey,
   listArchiveAgeOptionPreviews,
   planArchiveOlderThan,
@@ -1402,6 +1414,20 @@ export function AppWorkbench() {
   const [mcpServers, setMcpServers] = useState<api.McpDto[]>([]);
   const [mcpError, setMcpError] = useState<string | null>(null);
   const [mcpLoading, setMcpLoading] = useState(false);
+  /** Ignore out-of-order catalog responses from older project/session scopes. */
+  const mcpCatalogRequestRef = useRef(0);
+  /**
+   * Live MCP runtime projection (catalog + `mcp://` session events).
+   * Health comes from the running agent, so `/mcp` no longer depends on the
+   * user clicking a slow doctor run to learn what is actually usable.
+   */
+  const [mcpRuntime, setMcpRuntime] = useState<McpScopeState>(EMPTY_MCP_SCOPE);
+  const mcpRuntimeRef = useRef(mcpRuntime);
+  mcpRuntimeRef.current = mcpRuntime;
+  /** Updated every render so long-lived MCP listeners reject background events. */
+  const mcpViewedSessionRef = useRef<string | null>(null);
+  mcpViewedSessionRef.current =
+    session.sessionId ?? liveHostRef.current?.sessionId ?? null;
   /** MCP doctor report (coexists with inspect list; host `mcp_doctor`). */
   const [mcpDoctorReport, setMcpDoctorReport] =
     useState<api.McpDoctorReport | null>(null);
@@ -1424,6 +1450,9 @@ export function AppWorkbench() {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  /** Current project scope for rejecting late MCP catalog replies. */
+  const mcpProjectPathRef = useRef<string | null>(null);
+  mcpProjectPathRef.current = activeProject?.path ?? null;
   /**
    * On-disk default cwd for unbound chats (`workspaces/general`).
    * Not a sidebar project — used by connect / resource pane when no folder bound.
@@ -8446,28 +8475,173 @@ export function AppWorkbench() {
     });
   }, [composerMenuEntries.length]);
 
-  /** Re-run inspect list only — does not clear doctor findings. */
+  /**
+   * Refresh the MCP catalog from the canonical Host source.
+   *
+   * `mcp_catalog` reads the same definitions ACP session injection uses, so the
+   * list cannot disagree with what a session actually loads. Live health arrives
+   * separately via `mcp://` events; this call never starts a server and does not
+   * clear doctor findings.
+   */
   const refreshMcpModal = useCallback(async () => {
+    const requestId = ++mcpCatalogRequestRef.current;
+    const sessionId = mcpViewedSessionRef.current;
+    const projectPath = mcpProjectPathRef.current;
     setMcpLoading(true);
     setMcpError(null);
     try {
-      const res = await api.inspectMcp(activeProject?.path ?? null);
+      const res = await api.mcpCatalog(projectPath);
+      // The project or viewed chat can change while catalog I/O is pending.
+      // Do not apply its rows to a different MCP runtime scope.
+      if (
+        requestId !== mcpCatalogRequestRef.current ||
+        mcpViewedSessionRef.current !== sessionId ||
+        mcpProjectPathRef.current !== projectPath
+      ) {
+        return;
+      }
+      const servers = res.servers ?? [];
       // Host list only — never invent placeholder servers.
-      setMcpServers(res.servers ?? []);
+      setMcpServers(servers);
+      setMcpRuntime((prev) =>
+        applyMcpCatalog(prev, servers, {
+          sessionId: sessionId ?? prev.sessionId,
+        }),
+      );
       if (res.error) setMcpError(res.error);
     } catch (e) {
-      setMcpServers([]);
-      setMcpError(String(e));
+      if (
+        requestId === mcpCatalogRequestRef.current &&
+        mcpViewedSessionRef.current === sessionId &&
+        mcpProjectPathRef.current === projectPath
+      ) {
+        setMcpServers([]);
+        setMcpError(String(e));
+      }
     } finally {
-      setMcpLoading(false);
+      if (requestId === mcpCatalogRequestRef.current) setMcpLoading(false);
     }
-  }, [activeProject?.path]);
+  }, []);
+
+  const refreshMcpRuntime = useCallback(async (sessionId?: string | null) => {
+    const target = sessionId ?? mcpViewedSessionRef.current;
+    if (!target) return;
+    const snapshot = await api.sessionMcpRuntime(target);
+    if (!snapshot || snapshot.sessionId !== target) return;
+    // A switch can happen while the read-only Host request is in flight. Never
+    // let its late answer replace the runtime the current modal is displaying.
+    if (mcpViewedSessionRef.current !== target) return;
+    setMcpRuntime((prev) => applyMcpRuntimeSnapshot(prev, snapshot));
+  }, []);
+
+  const refreshMcpRuntimeRef = useRef(refreshMcpRuntime);
+  refreshMcpRuntimeRef.current = refreshMcpRuntime;
 
   const openMcpModal = useCallback(async () => {
     setShowMcpModal(true);
-    // Keep prior doctor results when re-opening; only refresh inspect list.
-    await refreshMcpModal();
-  }, [refreshMcpModal]);
+    // Catalog identifies rows; runtime supplies health. Run both read-only calls
+    // together so open does not paint a catalog-only unknown state first.
+    await Promise.allSettled([refreshMcpModal(), refreshMcpRuntime()]);
+  }, [refreshMcpModal, refreshMcpRuntime]);
+
+  // Live MCP lifecycle from the running agent. Subscribe to every lifecycle
+  // topic concurrently. Sequential await left a multi-event registration gap
+  // during session startup; the durable Host snapshot below closes the remaining
+  // cold-start window.
+  useEffect(() => {
+    if (!api.hasHost()) return;
+    let cancelled = false;
+    const applyForCurrentSession = (
+      event: { sessionId?: string | null },
+      apply: (prev: McpScopeState) => McpScopeState,
+    ) => {
+      const target = event.sessionId?.trim();
+      if (!target || target !== mcpViewedSessionRef.current) return;
+      setMcpRuntime(apply);
+    };
+    const listeners = [
+      api.listen<{ sessionId?: string; connected?: number; total?: number }>(
+        "mcp://init_progress",
+        (payload) => {
+          if (!cancelled && payload) {
+            applyForCurrentSession(payload, (prev) => applyMcpInitProgress(prev, payload));
+          }
+        },
+      ),
+      api.listen<{ sessionId?: string }>("mcp://initialized", (payload) => {
+        if (!cancelled && payload) {
+          applyForCurrentSession(payload, (prev) => applyMcpInitialized(prev, payload));
+        }
+      }),
+      api.listen<{
+        sessionId?: string;
+        server?: string;
+        status?: string;
+        reason?: string | null;
+        toolCount?: number | null;
+      }>("mcp://server_status", (payload) => {
+        if (!cancelled && payload) {
+          applyForCurrentSession(payload, (prev) => applyMcpServerStatus(prev, payload));
+        }
+      }),
+      api.listen<{ sessionId?: string; kind?: string; server?: string }>(
+        "mcp://catalog_stale",
+        (payload) => {
+          if (!cancelled && payload) {
+            applyForCurrentSession(payload, (prev) => applyMcpCatalogStale(prev, payload));
+          }
+        },
+      ),
+    ];
+    void Promise.all(listeners).then((offs) => {
+      if (cancelled) {
+        for (const off of offs) off();
+        return;
+      }
+      // Listeners are now all installed; replay anything the Host emitted before
+      // this WebView became ready. No doctor/server start is involved.
+      void refreshMcpRuntimeRef.current();
+    });
+    return () => {
+      cancelled = true;
+      void Promise.allSettled(listeners).then((results) => {
+        for (const result of results) {
+          if (result.status === "fulfilled") result.value();
+        }
+      });
+    };
+  }, []);
+
+  // Move to a blank scope immediately on chat switch. Keeping previous rows
+  // until async replies complete was visually misleading: one chat's MCP health
+  // appeared under another chat for a frame or two.
+  useEffect(() => {
+    const target = session.sessionId ?? liveHostRef.current?.sessionId ?? null;
+    setMcpServers([]);
+    setMcpError(null);
+    setMcpRuntime((prev) => beginMcpRuntimeSession(prev, target));
+  }, [liveHostRef, session.sessionId]);
+
+  // Replay lifecycle state whenever the displayed session changes or `/mcp`
+  // becomes visible. This is a read-only Host snapshot, not doctor.
+  useEffect(() => {
+    if (!api.hasHost()) return;
+    void refreshMcpRuntime();
+  }, [refreshMcpRuntime, showMcpModal]);
+
+  // One coalesced refetch when the session reports a topology/tool change and
+  // the panel is actually visible. No polling, no interval.
+  useEffect(() => {
+    if (
+      !shouldRefreshMcpCatalog(mcpRuntime, {
+        visible: showMcpModal,
+        fetching: mcpLoading,
+      })
+    ) {
+      return;
+    }
+    void refreshMcpModal();
+  }, [mcpRuntime, showMcpModal, mcpLoading, refreshMcpModal]);
 
   /**
    * Run `grok mcp doctor --json [name]`. Optional name focuses one server
@@ -10692,6 +10866,21 @@ export function AppWorkbench() {
     );
     if (next !== effort) setEffort(next);
   }, [activeEffortCatalog, effort]);
+
+  /**
+   * Footer note for the model list when the selection cannot take effect yet.
+   *
+   * The Host freezes a run's model at dispatch, so switching mid-turn only
+   * changes the next turn. Saying so is the difference between "the picker
+   * lied" and "the picker told me when this applies".
+   */
+  const modelApplyNote = useMemo(() => {
+    if (!session.modelSwitchPending) return null;
+    const running = session.runningModelId?.trim();
+    return running
+      ? tr("composer.modelAppliesNextTurnFrom").replace("{model}", running)
+      : tr("composer.modelAppliesNextTurn");
+  }, [session.modelSwitchPending, session.runningModelId, tr]);
 
   const handleModelPick = useCallback(
     async (pick: ComposerModelPick) => {
@@ -17809,19 +17998,21 @@ export function AppWorkbench() {
             }
             data-side-dock={sideDockActive ? "true" : undefined}
           >
-            {welcomeSession && welcomeBrandKind && !sideDockActive ? (
-              <div className="composer-welcome-mark">
-                <SuperGrokMark
-                  kind={welcomeBrandKind}
-                  title={
-                    customRouteActive
-                      ? "SuperGrok"
-                      : account?.billing?.subscriptionTier?.trim() ||
-                        (welcomeBrandKind === "heavy"
-                          ? "SuperGrok Heavy"
-                          : "SuperGrok")
-                  }
-                />
+            {welcomeSession && !sideDockActive ? (
+              <div className="composer-welcome-mark" aria-hidden={!welcomeBrandKind}>
+                {welcomeBrandKind ? (
+                  <SuperGrokMark
+                    kind={welcomeBrandKind}
+                    title={
+                      customRouteActive
+                        ? "SuperGrok"
+                        : account?.billing?.subscriptionTier?.trim() ||
+                          (welcomeBrandKind === "heavy"
+                            ? "SuperGrok Heavy"
+                            : "SuperGrok")
+                    }
+                  />
+                ) : null}
               </div>
             ) : null}
             {perm ? (
@@ -18577,6 +18768,7 @@ export function AppWorkbench() {
                         ),
                         modelSearchEmpty: tr("composer.modelSearchEmpty"),
                       }}
+                      applyNotes={{ model: modelApplyNote }}
                       onModelPick={(pick) => {
                         void handleModelPick(pick);
                       }}
@@ -19835,6 +20027,7 @@ export function AppWorkbench() {
         servers={mcpServers}
         error={mcpError}
         loading={mcpLoading}
+        runtime={mcpRuntime}
         onClose={() => setShowMcpModal(false)}
         onManage={() => navigateSettings("extensions")}
         onRefresh={() => void refreshMcpModal()}

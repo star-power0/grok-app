@@ -160,17 +160,7 @@ impl SessionManager {
                 );
                 Self::emit_runtime(
                     app,
-                    &SessionSnapshot {
-                        session_id: Some(session_id),
-                        agent_session_id: None,
-                        state: SessionState::Ready,
-                        last_error: None,
-                        streaming_message_id: None,
-                        backend: Self::backend_name(),
-                        model_id: None,
-                        project_path: None,
-                        title: String::new(),
-                    },
+                    &Self::runtime_snapshot(session_id, SessionState::Ready),
                 );
                 Self::emit_state(app, &self.snapshot());
             }
@@ -198,17 +188,7 @@ impl SessionManager {
                 }
                 Self::emit_runtime(
                     app,
-                    &SessionSnapshot {
-                        session_id: Some(session_id.clone()),
-                        agent_session_id: None,
-                        state: SessionState::Ready,
-                        last_error: None,
-                        streaming_message_id: None,
-                        backend: Self::backend_name(),
-                        model_id: None,
-                        project_path: None,
-                        title: String::new(),
-                    },
+                    &Self::runtime_snapshot(session_id.clone(), SessionState::Ready),
                 );
                 let _ = app.emit(
                     "session://stream_stall_hard_end",

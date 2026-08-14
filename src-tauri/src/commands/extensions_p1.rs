@@ -1,15 +1,13 @@
-
 /// List invocable skills from `grok inspect --json`.
 /// Always returns Ok; on CLI missing / timeout, `skills` is empty and `error` is set.
 /// Each skill includes `enabled` from App Extensions prefs (default true).
 #[tauri::command]
 pub async fn skills_list(project_path: Option<String>) -> Result<serde_json::Value, String> {
     let path = project_path.clone();
-    let (parsed, error) = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_inspect(path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let (parsed, error) =
+        tauri::async_runtime::spawn_blocking(move || run_grok_inspect(path.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?;
 
     let skills = parsed.as_ref().map(parse_skills).unwrap_or_default();
     let skills = attach_skill_enabled(skills);
@@ -51,12 +49,7 @@ pub async fn skill_write(
     let content = content.clone();
     let project_path = project_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::skill_edit::skill_write(
-            &path,
-            &content,
-            expected_mtime_ms,
-            project_path.as_deref(),
-        )
+        crate::skill_edit::skill_write(&path, &content, expected_mtime_ms, project_path.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -93,17 +86,71 @@ pub async fn skill_create(
     .map_err(|e| e.to_string())?
 }
 
+/// Canonical MCP catalog for UI surfaces.
+///
+/// Uses the same discovery source as ACP session injection
+/// (`extensions::list_mcp_server_defs` + App enable prefs) so the servers a user
+/// sees are exactly the servers a session will load. `grok inspect` remains the
+/// last-resort fallback inside that discovery chain rather than a separate,
+/// diverging source of truth.
+///
+/// This reports **configuration**, never health: rows are `notConnected` until a
+/// live session reports real MCP status. It intentionally starts no servers.
+#[tauri::command]
+pub async fn mcp_catalog(project_path: Option<String>) -> Result<serde_json::Value, String> {
+    let path = project_path.clone();
+    let (defs, prefs) = tauri::async_runtime::spawn_blocking(move || {
+        let defs = crate::extensions::list_mcp_server_defs(path.as_deref());
+        let prefs = crate::extensions::load_prefs();
+        (defs, prefs)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let servers: Vec<serde_json::Value> = defs
+        .iter()
+        .map(|def| {
+            let enabled = crate::extensions::is_enabled(&prefs.mcp, &def.name);
+            let transport = def.transport.clone().unwrap_or_else(|| {
+                if def.url.is_some() {
+                    "http".into()
+                } else {
+                    "stdio".into()
+                }
+            });
+            // Target is display-only; never forward env/headers (may hold secrets).
+            let target = def
+                .url
+                .clone()
+                .or_else(|| def.command.clone())
+                .map(|value| crate::store::redact_text(&value).trim().to_string());
+            serde_json::json!({
+                "name": def.name,
+                "transport": transport,
+                "target": target,
+                "scope": def.scope,
+                "enabled": enabled,
+                "configEnabled": def.enabled,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "servers": servers,
+        "source": "config",
+    }))
+}
+
 /// List MCP servers from `grok inspect --json`.
 /// Always returns Ok; on CLI missing / timeout, `servers` is empty and `error` is set.
 /// Each server includes `enabled` from App Extensions prefs (default true).
 #[tauri::command]
 pub async fn inspect_mcp(project_path: Option<String>) -> Result<serde_json::Value, String> {
     let path = project_path.clone();
-    let (parsed, error) = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_inspect(path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let (parsed, error) =
+        tauri::async_runtime::spawn_blocking(move || run_grok_inspect(path.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut servers = parsed.as_ref().map(parse_mcp_servers).unwrap_or_default();
     let prefs = crate::extensions::load_prefs();
@@ -178,8 +225,7 @@ fn build_project_inspect_summary(
         .map(|s| s.to_string());
 
     let mut models_hints = models_hints;
-    let mut seen_models: std::collections::HashSet<String> =
-        models_hints.iter().cloned().collect();
+    let mut seen_models: std::collections::HashSet<String> = models_hints.iter().cloned().collect();
     let mut push_model = |s: String| {
         let t = s.trim().to_string();
         if t.is_empty() || seen_models.contains(&t) {
@@ -226,9 +272,7 @@ fn build_project_inspect_summary(
     };
 
     let project_root = json_str(v.get("projectRoot"));
-    let project_path_out = path_trim
-        .clone()
-        .or_else(|| project_root.clone());
+    let project_path_out = path_trim.clone().or_else(|| project_root.clone());
 
     // Rules / project instructions — paths only.
     let mut rules = Vec::new();
@@ -290,13 +334,8 @@ fn build_project_inspect_summary(
             let name = json_str(item.get("name"));
             let Some(name) = name else { continue };
             all_skill_names.push(name.clone());
-            let src = skill_source_label(
-                item.get("source").unwrap_or(&serde_json::Value::Null),
-            );
-            let count = by_source
-                .get(&src)
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0);
+            let src = skill_source_label(item.get("source").unwrap_or(&serde_json::Value::Null));
+            let count = by_source.get(&src).and_then(|x| x.as_u64()).unwrap_or(0);
             by_source.insert(src, serde_json::json!(count + 1));
             let inv = item
                 .get("userInvocable")
@@ -342,9 +381,7 @@ fn build_project_inspect_summary(
         for item in arr {
             let name = json_str(item.get("name"));
             let Some(name) = name else { continue };
-            let source = skill_source_label(
-                item.get("source").unwrap_or(&serde_json::Value::Null),
-            );
+            let source = skill_source_label(item.get("source").unwrap_or(&serde_json::Value::Null));
             agents.push(serde_json::json!({
                 "name": name,
                 "source": source,
@@ -360,7 +397,9 @@ fn build_project_inspect_summary(
                 hooks.push(serde_json::json!({ "event": s }));
                 continue;
             }
-            let Some(obj) = item.as_object() else { continue };
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
             let event = json_str(obj.get("event")).or_else(|| json_str(obj.get("name")));
             let hook_type = json_str(obj.get("hookType"))
                 .or_else(|| json_str(obj.get("hook_type")))
@@ -422,7 +461,13 @@ fn build_project_inspect_summary(
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| store::redact_text(s).trim().chars().take(400).collect::<String>());
+        .map(|s| {
+            store::redact_text(s)
+                .trim()
+                .chars()
+                .take(400)
+                .collect::<String>()
+        });
 
     // Models hints from inspect when present.
     if let Some(arr) = v.get("models").and_then(|x| x.as_array()) {
@@ -442,9 +487,7 @@ fn build_project_inspect_summary(
             push_model(format!("channel:{ch}"));
         }
     }
-    if let Some(dm) = json_str(v.get("defaultModel"))
-        .or_else(|| json_str(v.get("default_model")))
-    {
+    if let Some(dm) = json_str(v.get("defaultModel")).or_else(|| json_str(v.get("default_model"))) {
         push_model(dm);
     }
 
@@ -505,11 +548,10 @@ fn build_project_inspect_summary(
 #[tauri::command]
 pub async fn project_inspect(project_path: Option<String>) -> Result<serde_json::Value, String> {
     let path = project_path.clone();
-    let (parsed, error) = tauri::async_runtime::spawn_blocking(move || {
-        run_grok_inspect(path.as_deref())
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let (parsed, error) =
+        tauri::async_runtime::spawn_blocking(move || run_grok_inspect(path.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?;
 
     // Model ids from local cache (hints only — not secrets).
     let models_hints: Vec<String> = {
@@ -597,11 +639,10 @@ pub async fn extensions_enable_all_mcp(
     mgr: State<'_, Arc<SessionManager>>,
     names: Vec<String>,
 ) -> Result<crate::extensions::ExtensionsPrefs, String> {
-    let prefs = tauri::async_runtime::spawn_blocking(move || {
-        crate::extensions::enable_all_mcp(&names)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let prefs =
+        tauri::async_runtime::spawn_blocking(move || crate::extensions::enable_all_mcp(&names))
+            .await
+            .map_err(|e| e.to_string())??;
     mgr.apply_extensions_mcp_change(&app).await;
     Ok(prefs)
 }
@@ -611,11 +652,9 @@ pub async fn extensions_enable_all_mcp(
 pub async fn extensions_enable_all_skills(
     names: Vec<String>,
 ) -> Result<crate::extensions::ExtensionsPrefs, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::extensions::enable_all_skills(&names)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || crate::extensions::enable_all_skills(&names))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 // ── Plugins via Grok Build CLI (`grok plugin …` + `inspect` + config.toml) ──
@@ -704,11 +743,16 @@ fn run_grok_cli_args(args: &[&str], timeout_secs: u64) -> Result<(String, String
 /// Path to the user-level Grok config that tracks plugin enable/disable.
 /// Same file Grok Build reads for `[plugins].enabled` / `[plugins].disabled`.
 fn user_grok_config_toml() -> std::path::PathBuf {
-    crate::process_util::user_home().join(".grok").join("config.toml")
+    crate::process_util::user_home()
+        .join(".grok")
+        .join("config.toml")
 }
 
 /// Parse a string-array key under `[plugins]` (single- or multi-line).
-pub fn parse_plugins_toml_string_array(toml_text: &str, key: &str) -> std::collections::HashSet<String> {
+pub fn parse_plugins_toml_string_array(
+    toml_text: &str,
+    key: &str,
+) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let mut in_plugins = false;
     let mut collecting = false;
@@ -821,7 +865,9 @@ pub fn plugin_matches_disabled(
             if tail == name {
                 // Optional: also match hash against repo_key suffix
                 if let Some(rk) = repo_key {
-                    if head.ends_with(rk) || rk.ends_with(head.rsplit_once('/').map(|(_, h)| h).unwrap_or(head)) {
+                    if head.ends_with(rk)
+                        || rk.ends_with(head.rsplit_once('/').map(|(_, h)| h).unwrap_or(head))
+                    {
                         return true;
                     }
                 }
@@ -871,14 +917,8 @@ fn parse_inspect_plugins_map(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let provides = item.get("provides").map(|p| PluginProvidesDto {
-            skills: p
-                .get("skills")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
-            agents: p
-                .get("agents")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
+            skills: p.get("skills").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            agents: p.get("agents").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             hooks: p.get("hooks").and_then(|x| x.as_bool()).unwrap_or(false),
             mcp_servers: p
                 .get("mcpServers")

@@ -38,8 +38,6 @@ import {
   buildMcpProCopySummary,
   classifyMcpDoctorOpError,
   classifyMcpProStatus,
-  countMcpProByStatus,
-  filterMcpProRows,
   mcpProStatusBadgeMod,
   mcpProStatusLabelKey,
   MCP_PRO_STATUS_FILTERS,
@@ -47,6 +45,46 @@ import {
   type McpProStatus,
   type McpProStatusFilter,
 } from "@/lib/mcpStatusPro";
+import {
+  EMPTY_MCP_SCOPE,
+  type McpRuntimePhase,
+  type McpScopeState,
+} from "@/lib/mcpRuntime";
+
+/** Badge modifier + label for a live MCP runtime phase. */
+function runtimeBadge(phase: McpRuntimePhase): {
+  mod: string;
+  labelKey: MessageKey;
+} {
+  switch (phase) {
+    case "ready":
+      return { mod: "ok", labelKey: "ext.mcp.status.ok" as MessageKey };
+    case "needsAuth":
+      return { mod: "warn", labelKey: "ext.mcp.status.oauth" as MessageKey };
+    case "unavailable":
+      return { mod: "error", labelKey: "ext.mcp.status.error" as MessageKey };
+    case "disabled":
+      return { mod: "muted", labelKey: "ext.mcp.status.disabled" as MessageKey };
+    default:
+      // initializing / notConnected / unknown all mean "not proven usable yet".
+      return { mod: "muted", labelKey: "ext.mcp.status.unknown" as MessageKey };
+  }
+}
+
+function runtimeProStatus(phase: McpRuntimePhase): McpProStatus {
+  switch (phase) {
+    case "ready":
+      return "ok";
+    case "needsAuth":
+      return "oauth";
+    case "unavailable":
+      return "error";
+    case "disabled":
+      return "disabled";
+    default:
+      return "unknown";
+  }
+}
 
 export type McpServerRow = {
   name: string;
@@ -165,6 +203,7 @@ export function McpStatusModal({
   servers,
   error,
   loading,
+  runtime,
   onClose,
   onManage,
   onRefresh,
@@ -181,6 +220,11 @@ export function McpStatusModal({
   servers: McpServerRow[];
   error?: string | null;
   loading?: boolean;
+  /**
+   * Live MCP runtime from the active session (`mcp://` events). Present rows win
+   * over the doctor report because they describe the agent that is running now.
+   */
+  runtime?: McpScopeState;
   onClose: () => void;
   /** Open Settings → Extensions for full Skills/MCP management. */
   onManage?: () => void;
@@ -228,19 +272,58 @@ export function McpStatusModal({
     [doctorReport],
   );
 
-  const statusCounts = useMemo(
-    () => countMcpProByStatus(servers, doctorStatusIndex),
-    [servers, doctorStatusIndex],
+  const runtimeState = runtime ?? EMPTY_MCP_SCOPE;
+  const runtimeByName = useMemo(
+    () => new Map(runtimeState.rows.map((row) => [row.name, row])),
+    [runtimeState],
   );
-  const filtered = useMemo(
-    () =>
-      filterMcpProRows(
-        servers,
-        { query, status: statusFilter },
-        doctorStatusIndex,
-      ),
-    [servers, query, statusFilter, doctorStatusIndex],
+  const initProgress = runtimeState.initProgress;
+
+  const serverStatus = useCallback(
+    (server: McpServerRow): McpProStatus => {
+      const live = runtimeByName.get(server.name);
+      if (live?.source === "session") return runtimeProStatus(live.phase);
+      return classifyMcpProStatus(
+        server,
+        lookupServerStatus(doctorStatusIndex, server.name),
+      );
+    },
+    [doctorStatusIndex, runtimeByName],
   );
+  const statusCounts = useMemo(() => {
+    const counts: Record<McpProStatusFilter, number> = {
+      all: servers.length,
+      ok: 0,
+      error: 0,
+      oauth: 0,
+      disabled: 0,
+      unknown: 0,
+    };
+    for (const server of servers) counts[serverStatus(server)] += 1;
+    return counts;
+  }, [servers, serverStatus]);
+  const filtered = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return servers.filter((server) => {
+      const status = serverStatus(server);
+      if (statusFilter !== "all" && status !== statusFilter) return false;
+      if (!normalizedQuery) return true;
+      const doctor = lookupServerStatus(doctorStatusIndex, server.name);
+      return [
+        server.name,
+        server.transport ?? "",
+        server.target ?? "",
+        server.vendor ?? "",
+        server.compatibilityStatus ?? "",
+        status,
+        doctor?.reason ?? "",
+        doctor?.tone ?? "",
+      ]
+        .join("\n")
+        .toLowerCase()
+        .includes(normalizedQuery);
+    });
+  }, [doctorStatusIndex, query, serverStatus, servers, statusFilter]);
 
   const hasActiveFilters =
     statusFilter !== "all" || query.trim().length > 0;
@@ -437,6 +520,12 @@ export function McpStatusModal({
     >
       <p className="mcp-modal__hint">{tr("mcpModal.hint")}</p>
 
+      {initProgress ? (
+        <p className="mcp-modal__summary" role="status">
+          {`MCP ${initProgress.connected ?? 0}/${initProgress.total ?? "?"}`}
+        </p>
+      ) : null}
+
       <div className="mcp-modal__toolbar">
         <input
           type="search"
@@ -600,21 +689,30 @@ export function McpStatusModal({
             const meta = mcpMetaLine(s);
             const doctorSt = lookupServerStatus(doctorStatusIndex, s.name);
             const oauthAction = classifyMcpOauthFromStatus(doctorSt);
-            const proStatus = classifyMcpProStatus(s, doctorSt);
-            // Prefer fine-grained doctor tone for badge when present (auth expired
-            // vs required); otherwise map pro chip status.
-            const badgeMod =
-              doctorSt &&
-              (doctorSt.tone === "auth_expired" ||
-                doctorSt.tone === "auth_required" ||
-                doctorSt.tone === "ok" ||
-                doctorSt.tone === "warn" ||
-                doctorSt.tone === "error")
+            // Live session status is the strongest evidence available; the
+            // doctor report only describes a separate probe run.
+            const liveRow = runtimeByName.get(s.name);
+            const liveBadge =
+              liveRow && liveRow.source === "session"
+                ? runtimeBadge(liveRow.phase)
+                : null;
+            const proStatus = serverStatus(s);
+            // Doctor is more specific only when there is no live session row.
+            const badgeMod = liveBadge
+              ? liveBadge.mod
+              : doctorSt &&
+                  (doctorSt.tone === "auth_expired" ||
+                    doctorSt.tone === "auth_required" ||
+                    doctorSt.tone === "ok" ||
+                    doctorSt.tone === "warn" ||
+                    doctorSt.tone === "error")
                 ? mcpStatusBadgeMod(doctorSt.tone)
                 : mcpProStatusBadgeMod(proStatus);
-            const badgeLabelKey = doctorSt
-              ? mcpStatusLabelKey(doctorSt.tone)
-              : mcpProStatusLabelKey(proStatus);
+            const badgeLabelKey = liveBadge
+              ? liveBadge.labelKey
+              : doctorSt
+                ? mcpStatusLabelKey(doctorSt.tone)
+                : mcpProStatusLabelKey(proStatus);
             const nameCopied = copiedKey === `${s.name}:name`;
             const targetCopied = copiedKey === `${s.name}:target`;
             const guidanceKey = doctorSt
@@ -637,17 +735,33 @@ export function McpStatusModal({
                     {s.name}
                   </strong>
                   <span
-                    className={"ext-badge ext-badge--" + badgeMod}
+                    className={
+                      "ext-badge ext-badge--" + (liveBadge?.mod ?? badgeMod)
+                    }
                     title={
-                      doctorSt?.reason
-                        ? redactMcpText(doctorSt.reason)
-                        : s.compatibilityStatus
-                          ? redactMcpText(s.compatibilityStatus)
-                          : undefined
+                      liveRow?.reason
+                        ? redactMcpText(liveRow.reason)
+                        : doctorSt?.reason
+                          ? redactMcpText(doctorSt.reason)
+                          : s.compatibilityStatus
+                            ? redactMcpText(s.compatibilityStatus)
+                            : undefined
                     }
                   >
-                    {tr(badgeLabelKey as MessageKey)}
+                    {tr((liveBadge?.labelKey ?? badgeLabelKey) as MessageKey)}
                   </span>
+                  {liveRow ? (
+                    <span
+                      className="mcp-modal__phase"
+                      data-phase={liveRow.phase}
+                      data-source={liveRow.source}
+                    >
+                      {liveRow.phase}
+                      {liveRow.toolCount != null
+                        ? ` · ${liveRow.toolCount}`
+                        : ""}
+                    </span>
+                  ) : null}
                   <span className="mcp-modal__item-actions">
                     {oauthAction ? (
                       <button

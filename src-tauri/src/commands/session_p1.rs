@@ -25,6 +25,17 @@ pub async fn session_get_state(
     Ok(mgr.snapshot())
 }
 
+/// Return the latest MCP lifecycle state for a live or background session.
+/// It replays Host-cached state and, when possible, asks the live agent for its
+/// cached `x.ai/mcp/list` view. It never starts a server or runs MCP doctor.
+#[tauri::command]
+pub async fn session_mcp_runtime(
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<Option<crate::session_manager::McpRuntimeSnapshot>, String> {
+    Ok(mgr.mcp_runtime_current(session_id.as_deref()).await)
+}
+
 #[tauri::command]
 pub async fn session_connect(
     app: tauri::AppHandle,
@@ -57,6 +68,20 @@ pub async fn session_send(
         .await
 }
 
+/// Re-dispatch the turn already running, under the currently selected model.
+///
+/// Distinct from `session_send`: the user turn keeps its identity (one question
+/// in history) and only the run epoch advances. Requires a run whose input was
+/// retained; a turn that already finished is not restartable through this path.
+#[tauri::command]
+pub async fn session_restart_run(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    session_id: Option<String>,
+) -> Result<SessionSnapshot, String> {
+    mgr.restart_active_run(app, session_id).await
+}
+
 /// Inject guidance into the active turn without cancelling the running prompt.
 /// `session_id` binds the interjection to a chat (live or background).
 #[tauri::command]
@@ -70,6 +95,20 @@ pub async fn session_interject(
 ) -> Result<SessionSnapshot, String> {
     mgr.interject_message(app, text, display_text, attachments, session_id)
         .await
+}
+
+/// Read a complete Host-owned tool result for the focused session only.
+///
+/// Artifact references are opaque identifiers emitted by `session://tool`; this
+/// command deliberately accepts no caller-controlled filesystem path.
+#[tauri::command]
+pub async fn session_tool_artifact(
+    mgr: State<'_, Arc<SessionManager>>,
+    artifact_ref: String,
+) -> Result<crate::tool_artifacts::ToolArtifactRead, String> {
+    let snapshot = mgr.snapshot();
+    let session_id = snapshot.session_id.ok_or("no active session")?;
+    crate::tool_artifacts::read_tool_output(&session_id, &artifact_ref)
 }
 
 /// Drop last user turn on agent + local journal (edit & resend).
@@ -144,7 +183,8 @@ pub async fn session_set_fork_agent_session(
     let meta = store::set_session_fork_agent_session(&id, fork_agent_session)?;
     let snap = mgr.snapshot();
     if fork_agent_session && snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_fork_agent").await;
+        mgr.soft_respawn_with_reason(&app, "session_fork_agent")
+            .await;
     }
     Ok(meta)
 }
@@ -256,9 +296,8 @@ pub async fn cli_install_latest(
     app: tauri::AppHandle,
     allow_unverified: Option<bool>,
 ) -> Result<crate::cli_install::CliInstallResult, String> {
-    let allow = allow_unverified.unwrap_or_else(|| {
-        store::load_settings().allow_unverified_cli_install
-    });
+    let allow =
+        allow_unverified.unwrap_or_else(|| store::load_settings().allow_unverified_cli_install);
     let result = crate::cli_install::install_cli_latest(app, allow).await?;
     // Remember last install verification for Doctor.
     let mut s = store::load_settings();
@@ -542,14 +581,12 @@ pub async fn cli_sessions_search(
     let settings = store::load_settings();
     let mode = settings.session_data_mode.clone();
     let probe = cli_probe::probe_cli(settings.manual_cli_path.as_deref());
-    let cli_path = probe.path.filter(|_| probe.found).map(std::path::PathBuf::from);
+    let cli_path = probe
+        .path
+        .filter(|_| probe.found)
+        .map(std::path::PathBuf::from);
     tauri::async_runtime::spawn_blocking(move || {
-        crate::cli_sessions::search_cli_sessions(
-            &query,
-            limit,
-            &mode,
-            cli_path.as_deref(),
-        )
+        crate::cli_sessions::search_cli_sessions(&query, limit, &mode, cli_path.as_deref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -563,12 +600,7 @@ pub async fn cli_session_import(
     project_id: Option<String>,
 ) -> Result<SessionMeta, String> {
     let mode = store::load_settings().session_data_mode;
-    crate::cli_sessions::import_cli_session(
-        &agent_session_id,
-        dir.as_deref(),
-        project_id,
-        &mode,
-    )
+    crate::cli_sessions::import_cli_session(&agent_session_id, dir.as_deref(), project_id, &mode)
 }
 
 /// Find the most recent CLI agent session for a project path (CLI `-c/--continue`).
@@ -619,11 +651,7 @@ pub async fn cli_sessions_delete(
     let mode = store::load_settings().session_data_mode;
     // Blocking disk IO off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
-        crate::cli_sessions::delete_cli_session(
-            &agent_session_id,
-            dir.as_deref(),
-            &mode,
-        )
+        crate::cli_sessions::delete_cli_session(&agent_session_id, dir.as_deref(), &mode)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -639,10 +667,7 @@ pub async fn session_create(
 }
 
 #[tauri::command]
-pub async fn session_set_scheduled(
-    id: String,
-    scheduled: bool,
-) -> Result<SessionMeta, String> {
+pub async fn session_set_scheduled(id: String, scheduled: bool) -> Result<SessionMeta, String> {
     store::set_session_scheduled(&id, scheduled)
 }
 
@@ -675,8 +700,7 @@ fn sanitize_session_id_for_label(session_id: &str) -> Option<&str> {
 }
 
 fn session_window_label(session_id: &str) -> Option<String> {
-    sanitize_session_id_for_label(session_id)
-        .map(|id| format!("{SESSION_WINDOW_LABEL_PREFIX}{id}"))
+    sanitize_session_id_for_label(session_id).map(|id| format!("{SESSION_WINDOW_LABEL_PREFIX}{id}"))
 }
 
 /// Open (or focus) a secondary webview window for a chat (`#/session/<id>`).
@@ -850,7 +874,8 @@ pub async fn session_set_plugin_dirs(
     let meta = store::set_session_plugin_dirs(&id, plugin_dirs)?;
     let snap = mgr.snapshot();
     if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_plugin_dirs").await;
+        mgr.soft_respawn_with_reason(&app, "session_plugin_dirs")
+            .await;
     }
     Ok(meta)
 }
@@ -867,7 +892,8 @@ pub async fn session_set_extra_rules(
     let meta = store::set_session_extra_rules(&id, extra_rules)?;
     let snap = mgr.snapshot();
     if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_extra_rules").await;
+        mgr.soft_respawn_with_reason(&app, "session_extra_rules")
+            .await;
     }
     Ok(meta)
 }
@@ -922,15 +948,14 @@ pub async fn session_set_no_ask_user(
     let meta = store::set_session_no_ask_user(&id, no_ask_user)?;
     let snap = mgr.snapshot();
     if snap.session_id.as_deref() == Some(meta.id.as_str()) {
-        mgr.soft_respawn_with_reason(&app, "session_no_ask_user").await;
+        mgr.soft_respawn_with_reason(&app, "session_no_ask_user")
+            .await;
     }
     Ok(meta)
 }
 
 #[tauri::command]
-pub async fn session_messages(
-    id: String,
-) -> Result<Vec<store::ChatMessageStored>, String> {
+pub async fn session_messages(id: String) -> Result<Vec<store::ChatMessageStored>, String> {
     // If Host dropped the final assistant stream, agent chat_history still has
     // it — merge before serving so reload / re-open recovers the answer.
     let _ = crate::cli_sessions::try_reconcile_linked_session(&id);
@@ -956,4 +981,3 @@ pub async fn media_server_endpoint(
         .ok_or_else(|| "media server not running".to_string())?;
     Ok(handle.endpoint())
 }
-

@@ -38,6 +38,8 @@ src-tauri/gen/schemas
 src-tauri/tauri.release.conf.json
 
 # Local runtime data & secrets
+.tmp/
+DEPLOYMENT_RECORD.md
 *.db
 *.db-*
 .env

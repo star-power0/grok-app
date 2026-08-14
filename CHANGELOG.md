@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-13
+
+### 已在真实桌面会话确认
+- **MCP 状态**：Host 的 session runtime snapshot、只读 `x.ai/mcp/list { cache: true }` 校正和前端
+  回放已在真实软件中验证；服务器行能反映实际初始化/连接状态，不再只显示静态配置目录。
+- **模型菜单稳定性**：welcome composer 固定品牌槽、菜单打开期间的数据/文案快照，以及 portal 的
+  ResizeObserver + requestAnimationFrame 位置合并已在真实软件中验证，冷启动 hydration 不再导致模型
+  菜单窗口抖动。
+- **协议互操作**：Chat Completions 与 Responses 可在同一会话续接时更稳定地保留上下文；图片、文件、
+  流式工具调用和工具结果的识别/传输均有实际改善。
+
+### Added
+- **MCP 会话 runtime snapshot + cached-list 校正**：Host 为 live/background session 保留初始化状态、
+  服务器状态、原因、工具数与观测时间；前端在订阅事件前后均可读取回放快照，再以只读
+  `x.ai/mcp/list { cache: true }` 校正。配置 catalog 和当前会话 health 明确分层。
+- **MCP 状态脱敏与来源标注**：`mcp://init_progress`、`mcp://initialized`、
+  `mcp://server_status`、`mcp://catalog_stale` 写入快照前均走脱敏路径；UI 标明
+  `snapshot` / `acp_list` / `merged`，没有 live 证据时不会显示 ready。
+- **模型菜单稳定性覆盖**：welcome composer 的品牌区域改为固定布局槽；模型菜单打开后冻结当前目录、
+  分组、effort 和所有可见 labels，关闭后才接收下一批 hydration 数据；浮动定位为 trigger/portal panel
+  安装 ResizeObserver，并用 requestAnimationFrame 与 rect 去重合并更新。
+- `mcpRuntime.test.ts`、`ComposerModelMenu.snapshot.test.ts` 和 `floatingMenu.test.ts`：覆盖启动期事件早到、
+  snapshot 回放、catalog 后到、旧 session 事件隔离、ready/needsAuth/unavailable 映射及菜单异步 hydration 稳定性。
+
+### Fixed
+- 配套 CLI 改进 Chat Completions / Responses 在同一对话内切换时的续接稳定性，并加强图片、文件、流式
+  工具调用和工具结果的协议保留与安全降级。
+- 移除一个未引用的 prompt timeout 旧别名；实际 timeout 行为仍由 idle silence 与 absolute ceiling 双重限制。
+
+### 已知问题（暂不在本版本修复）
+- **Anthropic Messages 兼容端点**：尽管已覆盖 redacted thinking、多个 thinking block 与未知合法帧，
+  部分第三方 Messages 兼容端点在多轮/流式场景仍会出现协议兼容问题；本版本不宣称 Messages 已完全解决。
+- **上下文/会话崩溃原因**：部分上下文相关的会话终止仍可能只表现为通用 `AGENT_CRASHED` 或断开，UI 不能
+  始终给出可操作的根因；后续需在保持错误脱敏的前提下补齐 Host 分类、持久化和可见诊断。
+- 本工作区的 Tauri Host `cargo test --lib mcp` 在 debug 与 release 均于测试二进制加载前失败
+  （Windows `STATUS_ENTRYPOINT_NOT_FOUND`），没有执行 MCP 断言；该限制不等同于 MCP 功能失败，
+  但不能作为 Host 运行时通过证据。
+
+### Validation
+- GUI：`pnpm typecheck`、`pnpm lint`、全量 `pnpm test`（348 files / 4843 tests）、Tauri
+  `cargo fmt -- --check` 与 `cargo check` 已通过；本 Release 在 A 盘重新构建和打包。
+- 无前台窗口回归：MCP runtime 20 项、floating menu 10 项、Composer model menu snapshot 7 项通过；
+  MCP 行状态与菜单几何另由用户在真实软件中确认。
+
+> **2026-08-11 重构第二轮**（运行生命周期冻结 / 模型切换语义 / 过期事件隔离 / 上下文兼容性接入发送路径）。
+
+### Added
+- `ActiveRun`/`FrozenRunConfig`：每次 `session/prompt` 发出时冻结模型、provider、effort 的快照；
+  活跃 run 通过 `{turnId, runEpoch}` 标识，model switch 不再静默覆盖正在运行回合的模型。
+- `run_epoch_seq`：per-session 单调递增，回合结束后不归零，避免晚到事件伪装成当前回合。
+- `SessionSnapshot` 新增字段：`activeTurnId`、`activeRunEpoch`、`runningModelId`（本回合冻结模型）、
+  `modelSwitchPending`（切换等待下一轮生效）、`canRestartActiveRun`（可用同问题重派发）。
+- `PendingRunPrompt`：保留活跃回合原始输入，支持换模型后一键重发同一问题。
+- `session_restart_run` Tauri 命令：中断当前回合（相同 turnId，epoch 递增）并在新模型下重派发。
+- `set_model_scoped`：返回 `ModelSwitchOutcome`，报告实际执行路径（立即生效 / 延后 / 重启当前回合），
+  `session_set_model` IPC 改为返回 `SetModelResult { prefs, switch }`。
+- `session://context_compatibility` 事件：发送前按目标模型能力检查附件，阻止静默降级。
+- `ContextAttachment::from_stored` + `classify_attachment`：按扩展名自动推断媒体类型。
+- `resolve_target_capabilities`：从 provider 配置（包括 per-model `supports_vision`）推断目标模型能力。
+- 组合器模型菜单 `applyNotes.model`：当 `modelSwitchPending` 时显示"下一轮生效"说明，
+  `runningModelId` 有值时注明本轮仍在用哪个模型。
+- 三语言 i18n 字符串：`composer.modelAppliesNextTurn`、`composer.modelAppliesNextTurnFrom`。
+- `session_manager/run.rs` 新增纯函数测试 14 条（含重派发后 epoch 隔离、快照字段正确性）。
+
+### Changed
+- `active_turn_id` 赋值统一改为 `open_run_locked` / `close_run_locked`，
+  消除散落的直接写法，使 turnId 生命周期与冻结配置保持同步。
+- `commit_interjection_boundary`：检查条件从 `turn_id: &str` 改为 `&ActiveRun`，
+  run 重启后旧 epoch 的 guidance 无法劫持新 run 的 assistant 行。
+- 派发任务 spawn 携带 `dispatched_run` 快照，RPC 结果返回后先验证 run 仍为当前 run，
+  已被重启超越的 epoch 的完成 / 错误回调直接丢弃，不写入新回合状态。
+- `pending_model` 应用失败时清除 `active_run.config.agent_model_id`，
+  避免快照谎称已切换但 agent 仍用旧模型。
+- `restart_active_run` 先调 `stop` 取消旧 run，再以相同 turnId 重派发，
+  两个 run 不会交错写入同一 assistant 行。
+- `snapshot_from_live`：同时报告 `model_id`（下一轮）和 `running_model_id`（本轮），
+  `idle` 快照补全全部新字段（带零值），消除前端字段缺失。
+- `runtime_snapshot` 辅助方法：背景生命周期事件用其构造只有 sid+state 的最小 snapshot，
+  不再散落六字段 struct literal。
+- `sessionSetModel` TS 函数返回 `SetModelResult`（含 `switch: ModelSwitchOutcome`）；
+  `SessionSnapshot` TS 类型同步新增运行身份字段。
+
+### 验证中
+- **冷启动模型选择窗口抖动**：已加入打开期间的模型/provider/文案快照、固定宽度 portal、welcome logo 固定占位槽和外层锚点观测；静态与本地 UI 检查通过，但尚待最终桌面程序的冷启动回归验证，不能在此标为已修复。
+- 模型切换时 UI 菜单不再将"等下一轮才生效的切换"显示为"已切换"。
+- 换模型后同一问题重发不再写入第二条 user journal 行（`restart_turn_id` 跳过入库）。
+- 延迟刷新 / 已知不可用状态不再被误报为 MCP available（沿用第一轮逻辑，本轮未改动）。
+
+> **2026-08-11 重构第一轮**（MCP 实时状态 / 工具结果可查 / 上下文兼容性校验）。
+
+### 已实现，待桌面运行时回归
+
+以下 MCP 状态链路已经通过前端单元测试和 Host 编译检查；在实际桌面会话验证徽标前，不应视为发布完成或替代 `mcp doctor`。
+
+- **`/mcp` 会话运行状态回放（Host + GUI）**：CLI 在会话启动时本就异步初始化
+  MCP 并推送 `x.ai/mcp/init_progress`、`x.ai/mcp_initialized`、
+  `x.ai/mcp/server_status`、`x.ai/mcp/tools_changed`、`x.ai/mcp/servers_updated`，
+  但 Host 的 ACP 解析器此前把这些通知全部丢弃，所以 `/mcp` 只能显示配置清单，用户
+  必须再点一次 doctor 才知道哪些可用。Host 现在解码并按会话/项目作用域转发为
+  `mcp://init_progress`、`mcp://initialized`、`mcp://server_status`、
+  `mcp://catalog_stale`（错误原因经脱敏、未知事件安全忽略），前端按服务器逐行呈现
+  `notConnected → initializing → ready / needsAuth / unavailable`。
+  未知状态一律映射为 `unknown`，绝不把“没有证据”显示成可用。
+- **`mcp_catalog` 统一目录来源（Host）**：`/mcp` 弹窗此前用 `grok inspect --json`，
+  与会话真正注入用的 `list_mcp_server_defs` 是两套来源，可能显示与实际加载不一致。
+  新命令复用注入所用的定义与启用偏好，只报告配置、不启动任何服务器，展示目标经脱敏。
+- **完整工具结果可查看（Host + GUI）**：终态工具输出现在完整写入会话私有工件
+  （`sessions/<id>/tool-artifacts/`），时间线只保留脱敏预览并标注是否截断。新增
+  `session_tool_artifact` 只接受不透明工件引用（拒绝路径穿越）、限定当前会话、
+  读取上限 2 MiB。工具行可展开加载完整结果，不再只剩 400 字符 / 8 行尾部。
+- **上下文兼容性校验（Host + GUI）**：新增能力模型（图像/视频/音频/文档/文件引用/
+  工具因果续接/provider 绑定续接）与校验模块，在发送或换模型前给出结构化 blocker /
+  warning：视觉历史切纯文本模型、未支持的附件类型、未闭合的工具因果组、跨 provider
+  的 provider-bound 续接。它不会静默丢弃或转换媒体；旧的 `supports_vision` 配置
+  保持有效（缺省即 `unknown`，不假设支持）。
+
+### Changed
+- MCP 目录刷新改为事件驱动：收到 tools/servers 变更只标记 stale，仅在面板可见时
+  做一次去重刷新；没有轮询，也没有前端重试循环。完整 `mcp doctor`（最长 90 秒、会
+  启动全部服务器）仍保持为显式的深度诊断入口。
+
 > **2026-08-09 第三轮**（responses 解析宽容 / 活跃站点换模型免全量回收）。
 
 ### Fixed
@@ -46,10 +167,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   后首次切模型慢、聊天区抖动的直接来源。
 
 ### Known Issues
-+- **启动期模型窗口抖动仍未解决（GUI）**：冷启动后数分钟内打开或切换模型时，模型
-  窗口仍可能抖动且响应偏慢；完成一次对话后恢复正常。首屏 provider 路由同批 hydration
-  与活跃站模型实时重绑已部署，但未消除该现象。现阶段不继续猜测根因，后续应采集冷启动
-  时的前端渲染、IPC 时序和 agent 状态后单独修复。
+- 上下文兼容性校验模块已落地并有测试覆盖，但尚未接到全部发送路径；当前不会自动阻断发送。
+- 本工作区的 Rust `cargo test --lib` 目前在测试二进制启动阶段即失败
+  （`STATUS_ENTRYPOINT_NOT_FOUND`，与本次改动无关），Host 侧验证以 `cargo check` 为准。
 
 > **2026-08-09 UI 稳定性迭代**：修复会话切换时的虚拟化窗口闪动，以及账户配置提供商列表在多站点时被压缩重叠。
 

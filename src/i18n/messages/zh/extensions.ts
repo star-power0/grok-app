@@ -1,7 +1,7 @@
 /** Simplified Chinese messages — domain: extensions */
 export const zhExtensions = {
   "mcpModal.title": "MCP 服务器",
-  "mcpModal.hint": "由 Grok Build inspect 发现的服务器。可在「设置 → 扩展」中启用/禁用；已启用的服务器会注入新会话。",
+  "mcpModal.hint": "列表为已配置的 MCP 服务器；有缓存时，徽标显示当前 Agent 会话的运行状态。可在「设置 → 扩展」中启用/禁用，变更会注入新会话。",
   "mcpModal.loading": "正在加载 MCP…",
   "mcpModal.empty": "未发现 MCP 服务器",
   "mcpModal.emptyHint": "请在「设置 → 扩展」中添加服务器，或在 Grok Build（~/.grok）中配置。应用不会虚构占位服务器。",

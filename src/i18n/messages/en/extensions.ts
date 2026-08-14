@@ -1,7 +1,7 @@
 /** English messages — domain: extensions */
 export const enExtensions = {
   "mcpModal.title": "MCP servers",
-  "mcpModal.hint": "Servers discovered by Grok Build (inspect). Enable or disable them under Settings → Extensions; enabled servers inject into new agent sessions.",
+  "mcpModal.hint": "The list is configured MCP servers. Badges show the current agent session's cached runtime status when available; use Settings → Extensions to enable or disable servers for new sessions.",
   "mcpModal.loading": "Loading MCP servers…",
   "mcpModal.empty": "No MCP servers discovered",
   "mcpModal.emptyHint": "Add servers under Settings → Extensions, or configure them in Grok Build (~/.grok). The app never invents placeholder servers.",

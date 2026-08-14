@@ -81,6 +81,9 @@ pub fn sync_compact_to_app(
             is_error: false,
             attachments: None,
             marker: Some("context_compact".into()),
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         },
     ) {
         tracing::warn!(%error, session = %session_id, "remote_im: append compact marker failed");
@@ -210,6 +213,9 @@ pub fn sync_turn_to_app(
         is_error: false,
         attachments: None,
         marker: None,
+        tool_artifact_ref: None,
+        tool_output_bytes: None,
+        tool_detail_truncated: false,
     };
     let asst_msg = ChatMessageStored {
         id: uuid::Uuid::new_v4().to_string(),
@@ -220,6 +226,9 @@ pub fn sync_turn_to_app(
         is_error,
         attachments: None,
         marker: None,
+        tool_artifact_ref: None,
+        tool_output_bytes: None,
+        tool_detail_truncated: false,
     };
     if let Err(e) = store::append_message(&sid, user_msg) {
         tracing::warn!(error = %e, session = %sid, "remote_im: append user message failed");

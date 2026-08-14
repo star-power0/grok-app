@@ -1,7 +1,7 @@
 /** Traditional Chinese messages — domain: extensions */
 export const zhTWExtensions = {
   "mcpModal.title": "MCP 伺服器",
-  "mcpModal.hint": "由 Grok Build inspect 發現的伺服器。可在「設定 → 擴充」中啟用/停用；已啟用的伺服器會注入新對話。",
+  "mcpModal.hint": "列表為已設定的 MCP 伺服器；有快取時，徽章顯示目前 Agent 對話的執行期狀態。可在「設定 → 擴充」中啟用/停用，變更會注入新對話。",
   "mcpModal.loading": "正在載入 MCP…",
   "mcpModal.empty": "未發現 MCP 伺服器",
   "mcpModal.emptyHint": "請在「設定 → 擴充」中新增伺服器，或在 Grok Build（~/.grok）中設定。應用不會虛構佔位伺服器。",

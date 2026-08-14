@@ -3,7 +3,7 @@
  * Phase interior uses GrokActivitySteps inside TimelinePhaseBlock.
  */
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { ChatMessage, MessageSegment, MessageToolSegment } from "@/lib/session";
@@ -32,6 +32,7 @@ import {
   IconSearch,
   IconWorld,
 } from "@/components/icons";
+import * as api from "@/lib/api";
 
 export function toolSegmentIsRunning(seg: MessageToolSegment): boolean {
   if (seg.streaming) return true;
@@ -125,6 +126,8 @@ export const TimelineToolRow = memo(function TimelineToolRow({
     tool,
     failed,
   );
+  const hasArtifact = !!tool.artifactRef?.trim();
+  const hasExpandableOutput = hasBody || hasArtifact;
 
   const [autoCollapse, setAutoCollapse] = useState(
     () => autoCollapseProp ?? loadToolStepsAutoCollapsePref(),
@@ -163,6 +166,30 @@ export const TimelineToolRow = memo(function TimelineToolRow({
       : toolStepDefaultOpen(running, autoCollapse);
 
   const [open, setOpen] = useState(() => prefOpen);
+  const [artifactText, setArtifactText] = useState<string | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+
+  const loadArtifact = useCallback(async () => {
+    const ref = tool.artifactRef?.trim();
+    if (!ref || artifactLoading || artifactText != null) return;
+    setArtifactLoading(true);
+    setArtifactError(null);
+    try {
+      const result = await api.sessionToolArtifact(ref);
+      setArtifactText(result.content);
+    } catch {
+      setArtifactError("Full tool result is unavailable.");
+    } finally {
+      setArtifactLoading(false);
+    }
+  }, [artifactLoading, artifactText, tool.artifactRef]);
+
+  useEffect(() => {
+    setArtifactText(null);
+    setArtifactError(null);
+    setArtifactLoading(false);
+  }, [tool.artifactRef]);
 
   useEffect(() => {
     if (running) {
@@ -179,7 +206,7 @@ export const TimelineToolRow = memo(function TimelineToolRow({
     }
   }, [running, autoCollapse, defaultExpanded, tool.toolCallId]);
 
-  const showBody = hasBody && open;
+  const showBody = hasExpandableOutput && open;
 
   return (
     <div
@@ -192,7 +219,7 @@ export const TimelineToolRow = memo(function TimelineToolRow({
       role="status"
       data-tool-id={tool.toolCallId}
       data-testid="timeline-tool"
-      data-expanded={hasBody ? (open ? "1" : "0") : undefined}
+      data-expanded={hasExpandableOutput ? (open ? "1" : "0") : undefined}
       title={tool.detail || tool.path || summary}
     >
       <div className="grok-act__icon-col" aria-hidden>
@@ -200,14 +227,18 @@ export const TimelineToolRow = memo(function TimelineToolRow({
           <ToolKindIcon tool={tool} />
         </span>
       </div>
-      {hasBody ? (
+      {hasExpandableOutput ? (
         <button
           type="button"
           className="grok-act__step-btn grok-act__step-btn--grow"
           aria-expanded={open}
           onClick={() => {
             userToggled.current = true;
-            setOpen((v) => !v);
+            setOpen((v) => {
+              const next = !v;
+              if (next) void loadArtifact();
+              return next;
+            });
           }}
         >
           <span className="grok-act__label">{summary}</span>
@@ -232,6 +263,23 @@ export const TimelineToolRow = memo(function TimelineToolRow({
           detailTail !== failHint &&
           detailTail !== failHintShort ? (
             <pre className="lobe-timeline-tool__detail">{detailTail}</pre>
+          ) : null}
+          {hasArtifact ? (
+            <div className="lobe-timeline-tool__artifact">
+              {artifactLoading ? <span>Loading full result…</span> : null}
+              {artifactError ? (
+                <span className="lobe-timeline-tool__fail-hint">{artifactError}</span>
+              ) : null}
+              {artifactText != null ? (
+                <pre className="lobe-timeline-tool__detail">{artifactText}</pre>
+              ) : null}
+              {artifactText == null && !artifactLoading && !artifactError ? (
+                <button type="button" className="btn btn--ghost btn--sm" onClick={() => void loadArtifact()}>
+                  {tool.detailTruncated ? "View full result" : "Open result artifact"}
+                  {tool.outputBytes ? ` (${tool.outputBytes.toLocaleString()} bytes)` : ""}
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}

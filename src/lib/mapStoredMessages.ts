@@ -31,6 +31,9 @@ export type StoredJournalMessage = {
   createdAt?: string | null;
   isError?: boolean | null;
   marker?: string | null;
+  toolArtifactRef?: string | null;
+  toolOutputBytes?: number | null;
+  toolDetailTruncated?: boolean | null;
   attachments?: Array<{
     path: string;
     name: string;
@@ -106,6 +109,9 @@ export function mapStoredMessageToChat(
     toolStatus: toolParsed?.status,
     toolDetail: toolParsed?.detail,
     toolPath: toolParsed?.path,
+    toolArtifactRef: m.toolArtifactRef ?? undefined,
+    toolOutputBytes: m.toolOutputBytes ?? undefined,
+    toolDetailTruncated: m.toolDetailTruncated ?? undefined,
     streaming: false,
   };
 }

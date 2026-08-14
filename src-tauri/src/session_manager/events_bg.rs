@@ -130,33 +130,16 @@ impl SessionManager {
                     self.promote_background_ready_to_parked(app_session_id);
                     Self::emit_runtime(
                         app,
-                        &SessionSnapshot {
-                            session_id: Some(app_session_id.to_string()),
-                            agent_session_id: None,
-                            state: SessionState::Ready,
-                            last_error: None,
-                            streaming_message_id: None,
-                            backend: Self::backend_name(),
-                            model_id: None,
-                            project_path: None,
-                            title: String::new(),
-                        },
+                        &Self::runtime_snapshot(app_session_id.to_string(), SessionState::Ready),
                     );
                 } else {
                     // Still busy in background — keep liveMap streaming.
                     Self::emit_runtime(
                         app,
-                        &SessionSnapshot {
-                            session_id: Some(app_session_id.to_string()),
-                            agent_session_id: None,
-                            state: SessionState::Streaming,
-                            last_error: None,
-                            streaming_message_id: None,
-                            backend: Self::backend_name(),
-                            model_id: None,
-                            project_path: None,
-                            title: String::new(),
-                        },
+                        &Self::runtime_snapshot(
+                            app_session_id.to_string(),
+                            SessionState::Streaming,
+                        ),
                     );
                 }
                 Self::emit_state(app, &self.snapshot());
@@ -293,6 +276,17 @@ impl SessionManager {
                 raw,
             } => {
                 let (detail, path_hint) = extract_tool_ui_fields(&raw);
+                let tool_artifact = if matches!(status.as_str(), "completed" | "failed" | "error") {
+                    extract_tool_result_text(&raw).and_then(|text| {
+                        crate::tool_artifacts::persist_tool_output(app_session_id, &text).ok()
+                    })
+                } else {
+                    None
+                };
+                let detail = tool_artifact
+                    .as_ref()
+                    .and_then(|artifact| artifact.detail.clone())
+                    .or(detail);
                 let path_out = path_hint.filter(|p| !p.is_empty());
                 let (kind_enriched, title_enriched) =
                     enrich_tool_identity_from_raw(&raw, &title, &kind);
@@ -391,6 +385,16 @@ impl SessionManager {
                                         is_error: matches!(st.as_str(), "failed" | "error"),
                                         attachments: None,
                                         marker: Some("tool_step".into()),
+                                        tool_artifact_ref: tool_artifact
+                                            .as_ref()
+                                            .and_then(|artifact| artifact.artifact_ref.clone()),
+                                        tool_output_bytes: tool_artifact
+                                            .as_ref()
+                                            .map(|artifact| artifact.output_bytes),
+                                        tool_detail_truncated: tool_artifact
+                                            .as_ref()
+                                            .map(|artifact| artifact.detail_truncated)
+                                            .unwrap_or(false),
                                     },
                                 );
                             }
@@ -435,23 +439,16 @@ impl SessionManager {
                         "status": st,
                         "path": path_out,
                         "detail": detail,
+                        "artifactRef": tool_artifact.as_ref().and_then(|artifact| artifact.artifact_ref.clone()),
+                        "outputBytes": tool_artifact.as_ref().map(|artifact| artifact.output_bytes),
+                        "detailTruncated": tool_artifact.as_ref().map(|artifact| artifact.detail_truncated).unwrap_or(false),
                     }),
                 );
                 if finished {
                     self.promote_background_ready_to_parked(app_session_id);
                     Self::emit_runtime(
                         app,
-                        &SessionSnapshot {
-                            session_id: Some(app_session_id.to_string()),
-                            agent_session_id: None,
-                            state: SessionState::Ready,
-                            last_error: None,
-                            streaming_message_id: None,
-                            backend: Self::backend_name(),
-                            model_id: None,
-                            project_path: None,
-                            title: String::new(),
-                        },
+                        &Self::runtime_snapshot(app_session_id.to_string(), SessionState::Ready),
                     );
                 }
             }
@@ -473,21 +470,78 @@ impl SessionManager {
                     self.promote_background_ready_to_parked(app_session_id);
                     Self::emit_runtime(
                         app,
-                        &SessionSnapshot {
-                            session_id: Some(app_session_id.to_string()),
-                            agent_session_id: None,
-                            state: SessionState::Ready,
-                            last_error: None,
-                            streaming_message_id: None,
-                            backend: Self::backend_name(),
-                            model_id: None,
-                            project_path: None,
-                            title: String::new(),
-                        },
+                        &Self::runtime_snapshot(app_session_id.to_string(), SessionState::Ready),
                     );
                 }
             }
+            AcpEvent::McpInitProgress { connected, total } => {
+                let project_path = self
+                    .background
+                    .lock()
+                    .get(app_session_id)
+                    .and_then(|session| session.project_path.clone());
+                self.emit_mcp_event_for_session(
+                    app,
+                    app_session_id,
+                    project_path.as_deref(),
+                    "mcp://init_progress",
+                    serde_json::json!({ "connected": connected, "total": total }),
+                );
+            }
+            AcpEvent::McpInitialized => {
+                let project_path = self
+                    .background
+                    .lock()
+                    .get(app_session_id)
+                    .and_then(|session| session.project_path.clone());
+                self.emit_mcp_event_for_session(
+                    app,
+                    app_session_id,
+                    project_path.as_deref(),
+                    "mcp://initialized",
+                    serde_json::json!({}),
+                );
+            }
+            AcpEvent::McpServerStatus {
+                server,
+                status,
+                reason,
+                tool_count,
+            } => {
+                let project_path = self
+                    .background
+                    .lock()
+                    .get(app_session_id)
+                    .and_then(|session| session.project_path.clone());
+                self.emit_mcp_event_for_session(
+                    app,
+                    app_session_id,
+                    project_path.as_deref(),
+                    "mcp://server_status",
+                    serde_json::json!({
+                        "server": server,
+                        "status": status,
+                        "reason": reason,
+                        "toolCount": tool_count,
+                    }),
+                );
+            }
+            AcpEvent::McpCatalogStale { kind, server } => {
+                let project_path = self
+                    .background
+                    .lock()
+                    .get(app_session_id)
+                    .and_then(|session| session.project_path.clone());
+                self.emit_mcp_event_for_session(
+                    app,
+                    app_session_id,
+                    project_path.as_deref(),
+                    "mcp://catalog_stale",
+                    serde_json::json!({ "kind": kind, "server": server }),
+                );
+            }
             AcpEvent::ProcessExited { .. } => {
+                self.mcp_runtime.lock().remove(app_session_id);
                 let mut bg = self.background.lock();
                 if let Some(mut s) = bg.remove(app_session_id) {
                     let busy = Self::live_session_is_busy(&s)
@@ -510,6 +564,9 @@ impl SessionManager {
                                 is_error: true,
                                 attachments: None,
                                 marker: Some("turn_cancelled".into()),
+                                tool_artifact_ref: None,
+                                tool_output_bytes: None,
+                                tool_detail_truncated: false,
                             },
                         );
                         let _ = app.emit(
@@ -533,7 +590,7 @@ impl SessionManager {
                     s.terminal_tool_ids.clear();
                     s.open_tool_seen_at.clear();
                     s.streaming_message_id = None;
-                    s.active_turn_id = None;
+                    Self::close_run_locked(&mut s);
                     s.stream_message_id_locked = false;
                     s.deferred_prompt_complete = None;
                     s.prompt_in_flight = false;

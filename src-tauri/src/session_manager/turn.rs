@@ -13,6 +13,7 @@ use crate::mock_acp::{self, StreamChunk};
 use crate::session_fsm::SessionState;
 use crate::store::{self, ChatMessageStored, MessageAttachmentStored};
 
+use super::run;
 use super::*;
 
 /// If the ACP event pump is wedged when `session/prompt` resolves, its
@@ -37,11 +38,37 @@ impl SessionManager {
         attachments: Option<Vec<MessageAttachmentStored>>,
         session_id: Option<String>,
     ) -> Result<SessionSnapshot, String> {
+        self.dispatch_turn(app, text, display_text, attachments, session_id, None)
+            .await
+    }
+
+    /// Dispatch one run.
+    ///
+    /// `restart_turn_id` continues an existing user turn under a new run epoch
+    /// (model switch applied to the question already asked). It suppresses the
+    /// duplicate user journal row, since that turn is already recorded.
+    pub(super) async fn dispatch_turn(
+        self: &Arc<Self>,
+        app: AppHandle,
+        text: String,
+        display_text: Option<String>,
+        attachments: Option<Vec<MessageAttachmentStored>>,
+        session_id: Option<String>,
+        restart_turn_id: Option<String>,
+    ) -> Result<SessionSnapshot, String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Err("empty message".into());
         }
         let is_manual_compact = is_manual_compact_command(&text);
+        // Retained verbatim so a restart of this turn reproduces the same input.
+        let display_text_for_restart = display_text.clone();
+        // Route id is read once per dispatch and frozen with the run, so a
+        // provider change mid-turn cannot retroactively relabel this output.
+        let provider_id = match crate::providers::active_route() {
+            crate::providers::ActiveRoute::Official => Some("official".to_string()),
+            crate::providers::ActiveRoute::Custom { id } => Some(id),
+        };
         // Journal stores UI form when provided (skill chips); agent still receives `text`.
         let mut journal_content = display_text
             .map(|s| s.trim().to_string())
@@ -58,6 +85,16 @@ impl SessionManager {
         // Note: image @path stripping + Host vision runs on the *final*
         // agent_prompt after history bootstrap (see below). Do not rewrite
         // here only — bootstrap can reintroduce @image paths from the journal.
+
+        // Context compatibility preflight. Findings are surfaced, never applied:
+        // no attachment is dropped or converted here. Host vision (below) is the
+        // sanctioned, explicit degradation for text-only mains, so an image
+        // blocker that Host vision will handle is reported as a warning instead.
+        self.emit_context_compatibility(
+            &app,
+            session_id.as_deref(),
+            journal_attachments.as_deref(),
+        );
 
         // Serialize against connect for the whole focus + turn-open window, so
         // the slot cannot move between the target check and `begin_stream`.
@@ -108,7 +145,20 @@ impl SessionManager {
             s.fsm.begin_stream().map_err(|e| e.to_string())?;
             s.prompt_in_flight = true;
             Self::touch_stream_progress_locked(s);
-            s.active_turn_id = Some(Uuid::new_v4().to_string());
+            // A deferred switch is applied at the turn boundary, so the run must
+            // freeze the model this prompt will actually be sent with — not the
+            // one the previous run used.
+            let agent_model = s.pending_model.clone().or_else(|| {
+                s.model_id
+                    .as_deref()
+                    .map(crate::providers::agent_spawn_model_id)
+            });
+            Self::open_run_locked(s, restart_turn_id.clone(), agent_model, provider_id.clone());
+            s.active_run_prompt = Some(PendingRunPrompt {
+                text: text.clone(),
+                display_text: display_text_for_restart.clone(),
+                attachments: journal_attachments.clone(),
+            });
             s.stream_message_id_locked = false;
             let mid = Uuid::new_v4().to_string();
             s.streaming_message_id = Some(mid.clone());
@@ -148,19 +198,27 @@ impl SessionManager {
             // persist user message (display form for skill chips on reload)
             // Journal stores the user-facing turn only — not the bootstrap wrapper.
             // Attachments are structured so history reloads image/file cards.
-            let _ = store::append_message(
-                &s.app_session_id,
-                ChatMessageStored {
-                    id: Uuid::new_v4().to_string(),
-                    role: "user".into(),
-                    content: journal_content.clone(),
-                    thought: None,
-                    created_at: chrono::Utc::now(),
-                    is_error: false,
-                    attachments: journal_attachments.clone(),
-                    marker: None,
-                },
-            );
+            //
+            // A restart re-dispatches a turn that is already in the journal;
+            // appending again would duplicate the question in history.
+            if restart_turn_id.is_none() {
+                let _ = store::append_message(
+                    &s.app_session_id,
+                    ChatMessageStored {
+                        id: Uuid::new_v4().to_string(),
+                        role: "user".into(),
+                        content: journal_content.clone(),
+                        thought: None,
+                        created_at: chrono::Utc::now(),
+                        is_error: false,
+                        attachments: journal_attachments.clone(),
+                        marker: None,
+                        tool_artifact_ref: None,
+                        tool_output_bytes: None,
+                        tool_detail_truncated: false,
+                    },
+                );
+            }
             Ok((
                 s.backend.clone(),
                 s.app_session_id.clone(),
@@ -343,7 +401,7 @@ impl SessionManager {
                             if s.fsm.state() == SessionState::Streaming {
                                 let _ = s.fsm.end_stream();
                                 s.streaming_message_id = None;
-                                s.active_turn_id = None;
+                                Self::close_run_locked(s);
                                 s.stream_message_id_locked = false;
                             }
                         }
@@ -377,7 +435,7 @@ impl SessionManager {
             self.with_session_mut(&app_sid, |s| {
                 s.prompt_in_flight = false;
                 s.streaming_message_id = None;
-                s.active_turn_id = None;
+                Self::close_run_locked(s);
                 s.stream_message_id_locked = false;
                 if s.fsm.state() == SessionState::Streaming {
                     let _ = s.fsm.end_stream();
@@ -388,17 +446,31 @@ impl SessionManager {
         };
         // A model switch requested while the previous turn was busy is applied
         // here, before this prompt, so the picker never blocks on a retrying agent.
+        // The run already froze this id (see `open_run_locked`), so a failed
+        // rebind must clear the frozen value instead of letting the run claim a
+        // model the agent never accepted.
         let pending_model = self
             .with_session_mut(&app_sid, |s| s.pending_model.take())
             .flatten();
         if let Some(pending) = pending_model {
             if let Err(e) = acp.set_model(&pending).await {
                 tracing::warn!("apply pending model {pending} before send failed: {e}");
+                self.with_session_mut(&app_sid, |s| {
+                    if let Some(run) = s.active_run.as_mut() {
+                        run.config.agent_model_id = None;
+                    }
+                });
             }
         }
         let mgr = Arc::clone(self);
         let app2 = app.clone();
         let turn_sid = app_sid.clone();
+        // Identity of the run this RPC belongs to. A restart supersedes the run
+        // while its `session/prompt` may still be pending; without this the late
+        // resolution would close or fail the run that replaced it.
+        let dispatched_run = self
+            .with_session_mut(&app_sid, |s| s.active_run.clone())
+            .flatten();
         if is_manual_compact {
             self.manual_compact_pending.lock().insert(app_sid.clone());
         }
@@ -408,6 +480,30 @@ impl SessionManager {
             } else {
                 acp.prompt_with_images(&prompt_text, &prompt_images).await
             };
+            // Re-check ownership *after* the await: this is the window a restart
+            // uses. Superseded runs may not touch session turn state.
+            if let Some(ref dispatched) = dispatched_run {
+                let still_ours = mgr
+                    .with_session_mut(&turn_sid, |s| {
+                        run::event_belongs_to_run(
+                            s.active_run.as_ref(),
+                            Some(&dispatched.turn_id),
+                            Some(dispatched.run_epoch),
+                        )
+                    })
+                    .unwrap_or(false);
+                if !still_ours {
+                    tracing::info!(
+                        target: "session",
+                        session = %turn_sid,
+                        turn = %dispatched.turn_id,
+                        epoch = dispatched.run_epoch,
+                        "dropping prompt RPC result from a superseded run"
+                    );
+                    mgr.manual_compact_pending.lock().remove(&turn_sid);
+                    return;
+                }
+            }
             match outcome {
                 Ok(stop_reason) => {
                     // The CLI completes `/compact` through x.ai/compact_conversation
@@ -519,7 +615,7 @@ impl SessionManager {
         }
         let target = session_id.as_deref();
 
-        let (backend, app_sid, turn_id, acp) = {
+        let (backend, app_sid, run, acp) = {
             if let Some(t) = target {
                 let guard = self.inner.lock();
                 if let Some(s) = guard.as_ref().filter(|s| s.app_session_id == t) {
@@ -553,6 +649,9 @@ impl SessionManager {
             is_error: false,
             attachments,
             marker: Some("interjection".into()),
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         };
 
         // Session may move between live/background while the ACP RPC is in flight.
@@ -560,7 +659,7 @@ impl SessionManager {
             let mut guard = self.inner.lock();
             if let Some(s) = guard.as_mut() {
                 if s.app_session_id == app_sid {
-                    Self::commit_interjection_boundary(s, &app, &message, &app_sid, &turn_id)?;
+                    Self::commit_interjection_boundary(s, &app, &message, &app_sid, &run)?;
                     return Ok(self.snapshot());
                 }
             }
@@ -568,7 +667,7 @@ impl SessionManager {
         {
             let mut background = self.background.lock();
             if let Some(s) = background.get_mut(&app_sid) {
-                Self::commit_interjection_boundary(s, &app, &message, &app_sid, &turn_id)?;
+                Self::commit_interjection_boundary(s, &app, &message, &app_sid, &run)?;
                 return Ok(self.snapshot());
             }
         }
@@ -626,6 +725,9 @@ impl SessionManager {
                             is_error: false,
                             attachments: None,
                             marker: Some("turn_cancelled".into()),
+                            tool_artifact_ref: None,
+                            tool_output_bytes: None,
+                            tool_detail_truncated: false,
                         },
                     );
                     let _ = app.emit(
@@ -645,7 +747,7 @@ impl SessionManager {
                     }
                 }
                 s.streaming_message_id = None;
-                s.active_turn_id = None;
+                Self::close_run_locked(s);
                 s.stream_message_id_locked = false;
                 s.stream_buf.clear();
                 s.stream_thought.clear();

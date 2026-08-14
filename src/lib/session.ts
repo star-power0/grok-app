@@ -34,9 +34,22 @@ export interface SessionSnapshot {
   lastError: AgentError | null;
   streamingMessageId: string | null;
   backend: string;
+  /** Model the **next** turn will use (composer selection). */
   modelId?: string | null;
   projectPath?: string | null;
   title?: string;
+  /** Identity of the run currently in flight. */
+  activeTurnId?: string | null;
+  activeRunEpoch?: number | null;
+  /**
+   * Model frozen by the in-flight run. Differs from `modelId` when the user
+   * switched models mid-turn, so a deferred switch is never shown as applied.
+   */
+  runningModelId?: string | null;
+  /** True when `modelId` cannot take effect until the next turn. */
+  modelSwitchPending?: boolean;
+  /** True when the running turn can be re-dispatched under the new model. */
+  canRestartActiveRun?: boolean;
 }
 
 export interface MessageAttachment {
@@ -54,6 +67,12 @@ export interface MessageToolSegment {
   status: string;
   detail?: string;
   path?: string;
+  /** Host-owned, access-controlled artifact containing the complete raw output. */
+  artifactRef?: string;
+  /** Total unredacted output bytes when the Host stored a separate artifact. */
+  outputBytes?: number;
+  /** True when inline detail is a safe preview rather than the full output. */
+  detailTruncated?: boolean;
   streaming?: boolean;
   isError?: boolean;
   /** ISO time when the tool row was created (history duration). */
@@ -100,6 +119,12 @@ export interface ChatMessage {
   toolKind?: string;
   toolDetail?: string;
   toolPath?: string;
+  /** Host-owned, access-controlled artifact containing the complete raw output. */
+  toolArtifactRef?: string;
+  /** Total unredacted output bytes when the Host stored a separate artifact. */
+  toolOutputBytes?: number;
+  /** True when `toolDetail` is a safe preview rather than the full output. */
+  toolDetailTruncated?: boolean;
   /**
    * Parent tool call id when the host/ACP marks nested tools (e.g. subagent
    * children). Optional — Tasks panel may infer when missing.
@@ -115,6 +140,12 @@ export interface ToolEventPayload {
   status?: string;
   path?: string | null;
   detail?: string | null;
+  /** Host-owned, access-controlled artifact containing complete raw output. */
+  artifactRef?: string | null;
+  /** Total unredacted output bytes when the Host stored a separate artifact. */
+  outputBytes?: number | null;
+  /** True when `detail` is only a safe preview. */
+  detailTruncated?: boolean | null;
   /** Parent tool call id when the wire event includes nesting. */
   parentId?: string | null;
 }
@@ -258,6 +289,9 @@ export function toolSegmentFromFields(fields: {
   status: string;
   detail?: string;
   path?: string;
+  artifactRef?: string;
+  outputBytes?: number;
+  detailTruncated?: boolean;
   streaming?: boolean;
   isError?: boolean;
   createdAt?: string;
@@ -270,6 +304,9 @@ export function toolSegmentFromFields(fields: {
     status: fields.status,
     detail: fields.detail,
     path: fields.path,
+    artifactRef: fields.artifactRef,
+    outputBytes: fields.outputBytes,
+    detailTruncated: fields.detailTruncated,
     streaming: !!fields.streaming,
     isError: !!fields.isError,
     createdAt: fields.createdAt,
@@ -671,6 +708,9 @@ export function syncTurnToolsIntoAssistant(
       status,
       detail: m.toolDetail,
       path: m.toolPath,
+      artifactRef: m.toolArtifactRef,
+      outputBytes: m.toolOutputBytes,
+      detailTruncated: m.toolDetailTruncated,
       streaming: !!m.streaming,
       isError: !!m.isError || status === "failed" || status === "error",
       createdAt: m.createdAt,
@@ -739,6 +779,13 @@ export function applyToolEvent(
     "";
   const toolKind = payload.kind || prev?.toolKind || undefined;
   const toolPath = payload.path?.trim() || prev?.toolPath || undefined;
+  // Complete raw results live behind a Host-owned artifact reference. A smaller
+  // inline preview may change over the stream, but a later sparse update must
+  // never erase a previously announced artifact or its truncation indicator.
+  const artifactRef = payload.artifactRef?.trim() || prev?.toolArtifactRef || undefined;
+  const outputBytes = payload.outputBytes ?? prev?.toolOutputBytes;
+  const detailTruncated =
+    payload.detailTruncated ?? prev?.toolDetailTruncated ?? false;
   const isError = status === "failed" || status === "error";
 
   // Host vision / X: **only** live on the assistant timeline. A separate
@@ -770,6 +817,9 @@ export function applyToolEvent(
         toolStatus: status || "in_progress",
         toolDetail: mergedDetail,
         toolPath,
+        toolArtifactRef: artifactRef,
+        toolOutputBytes: outputBytes,
+        toolDetailTruncated: detailTruncated,
         toolParentId: parentId,
         streaming: running,
         marker: "tool_step",
@@ -786,6 +836,9 @@ export function applyToolEvent(
       status: status || "in_progress",
       detail: mergedDetail,
       path: toolPath,
+      artifactRef,
+      outputBytes,
+      detailTruncated,
       streaming: running,
       isError,
       createdAt: prev?.createdAt || now,
@@ -826,6 +879,9 @@ export function applyToolEvent(
       content: mergedTitle,
       toolDetail: mergedDetail,
       toolPath: toolPath || prev!.toolPath,
+      toolArtifactRef: artifactRef || prev!.toolArtifactRef,
+      toolOutputBytes: outputBytes ?? prev!.toolOutputBytes,
+      toolDetailTruncated: detailTruncated || prev!.toolDetailTruncated,
       toolKind: toolKind || prev!.toolKind,
       toolParentId: parentId || prev!.toolParentId,
     };
@@ -843,6 +899,9 @@ export function applyToolEvent(
     status: row.toolStatus || status,
     detail: row.toolDetail,
     path: row.toolPath,
+    artifactRef: row.toolArtifactRef,
+    outputBytes: row.toolOutputBytes,
+    detailTruncated: row.toolDetailTruncated,
     streaming: running,
     isError: !!row.isError,
     createdAt: row.createdAt || prev?.createdAt || now,

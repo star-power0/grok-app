@@ -800,9 +800,8 @@
   color: var(--text-primary);
 }
 
-/* Wider model panel so long model ids are not clipped by 55% row-val caps. */
-.cmm--model .cmm__pop,
-.cmm--model .cmm__pop--portal {
+/* Portal panels live under document.body, so they need a body-safe model class. */
+.cmm__pop--model {
   min-width: min(320px, calc(100vw - 16px));
   max-width: min(420px, calc(100vw - 16px));
 }

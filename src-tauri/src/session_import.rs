@@ -258,6 +258,9 @@ pub fn import_transcript_as_session(
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         })
         .collect();
     store::save_messages(&meta.id, &msgs)?;

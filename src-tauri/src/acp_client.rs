@@ -146,9 +146,167 @@ pub enum AcpEvent {
         /// Raw update for client-side phase projection.
         raw: Value,
     },
+    /// MCP initialization progress for the session's configured servers.
+    ///
+    /// The CLI connects MCP servers in the background during session startup and
+    /// pushes progress; without this the GUI could only learn MCP health by
+    /// running a separate, slow `grok mcp doctor` process.
+    McpInitProgress {
+        connected: Option<u32>,
+        total: Option<u32>,
+    },
+    /// All configured MCP servers finished their initial connect attempt.
+    McpInitialized,
+    /// Per-server MCP runtime status delta (`ready` / `needs_auth` / …).
+    McpServerStatus {
+        server: String,
+        status: String,
+        reason: Option<String>,
+        tool_count: Option<u32>,
+    },
+    /// Server topology or tool list changed — the catalog snapshot is stale.
+    McpCatalogStale {
+        /// Wire kind for diagnostics (`tools_changed` / `servers_updated`).
+        kind: String,
+        server: Option<String>,
+    },
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+/// Canonical MCP runtime phases surfaced to the UI.
+///
+/// Unknown CLI tokens map to `unknown` rather than a healthy state: absence of
+/// evidence must never be rendered as "available".
+pub fn normalize_mcp_status(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "ready" | "connected" | "ok" | "healthy" => "ready",
+        "initializing" | "connecting" | "starting" | "pending" => "initializing",
+        "needs_auth" | "needsauth" | "unauthorized" | "auth_required" | "auth_expired" => {
+            "needsAuth"
+        }
+        "unavailable" | "failed" | "error" | "disconnected" | "exited" => "unavailable",
+        "disabled" => "disabled",
+        _ => "unknown",
+    }
+}
+
+/// Map an ACP notification method to an MCP lifecycle event.
+///
+/// Accepts both the `_x.ai/...` wire form and the bare extension name. Unknown
+/// or malformed MCP payloads return `None` so the session reader keeps running.
+pub fn decode_mcp_notification(method: &str, params: Option<&Value>) -> Option<AcpEvent> {
+    let bare = method.strip_prefix('_').unwrap_or(method);
+    let params = params.cloned().unwrap_or(Value::Null);
+    match bare {
+        "x.ai/mcp/init_progress" => {
+            let connected = params
+                .get("connected")
+                .or_else(|| params.get("completed"))
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            let total = params
+                .get("total")
+                .or_else(|| params.get("count"))
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            Some(AcpEvent::McpInitProgress { connected, total })
+        }
+        "x.ai/mcp_initialized" | "x.ai/mcp/initialized" => Some(AcpEvent::McpInitialized),
+        "x.ai/mcp/server_status" => parse_mcp_server_status(&params),
+        "x.ai/mcp/tools_changed" | "x.ai/mcp/servers_updated" => {
+            let kind = bare.rsplit('/').next().unwrap_or(bare).to_string();
+            let server = params
+                .get("server")
+                .or_else(|| params.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            Some(AcpEvent::McpCatalogStale { kind, server })
+        }
+        _ => None,
+    }
+}
+
+/// Redact provider-supplied MCP diagnostics before retaining them in a durable
+/// snapshot or forwarding them to the WebView. `store::redact_text` handles
+/// configured credentials and common token shapes; this additionally removes
+/// generic assignment values from foreign MCP implementations we do not control.
+fn redact_mcp_reason(raw: &str) -> String {
+    let redacted = crate::store::redact_text(raw);
+    redacted
+        .split_whitespace()
+        .map(|word| {
+            let split_at = word.find(['=', ':']);
+            let Some(split_at) = split_at else {
+                return word.to_string();
+            };
+            let key = word[..split_at]
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+                .to_ascii_lowercase()
+                .replace('-', "_");
+            let sensitive = matches!(
+                key.as_str(),
+                "api_key"
+                    | "apikey"
+                    | "access_token"
+                    | "auth_token"
+                    | "token"
+                    | "authorization"
+                    | "password"
+                    | "secret"
+            );
+            if sensitive {
+                format!("{}[REDACTED]", &word[..=split_at])
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Decode an `x.ai/mcp/server_status` notification payload.
+///
+/// Returns `None` when the server name is missing — a status without an owner
+/// cannot be attributed to a row and must not mutate unrelated servers.
+pub fn parse_mcp_server_status(params: &Value) -> Option<AcpEvent> {
+    let server = params
+        .get("server")
+        .or_else(|| params.get("name"))
+        .or_else(|| params.get("serverName"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let status = params
+        .get("status")
+        .or_else(|| params.get("state"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let reason = params
+        .get("reason")
+        .or_else(|| params.get("message"))
+        .or_else(|| params.get("detail"))
+        .or_else(|| params.get("error"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        // Server-supplied text can echo tokens/URLs from its own config.
+        .map(|s| redact_mcp_reason(s).chars().take(240).collect());
+    let tool_count = params
+        .get("toolCount")
+        .or_else(|| params.get("tools"))
+        .and_then(|v| v.as_u64().or_else(|| v.as_array().map(|a| a.len() as u64)))
+        .and_then(|n| u32::try_from(n).ok());
+    Some(AcpEvent::McpServerStatus {
+        server,
+        status: normalize_mcp_status(status).to_string(),
+        reason,
+        tool_count,
+    })
 }
 
 /// Host circuit-breaker: after this many provider retries, cancel the turn.
@@ -181,9 +339,6 @@ const PROMPT_IDLE_TIMEOUT_SECS: u64 = 600;
 const PROMPT_ABSOLUTE_TIMEOUT_SECS: u64 = 4 * 60 * 60;
 /// Poll slice while waiting for the `session/prompt` oneshot.
 const PROMPT_WAIT_SLICE_SECS: u64 = 5;
-/// Legacy alias used in docs/comments — idle silence window for prompt RPC.
-#[allow(dead_code)]
-const PROMPT_TIMEOUT_SECS: u64 = PROMPT_IDLE_TIMEOUT_SECS;
 /// After `_x.ai/session/prompt_complete`, wait this long for the real JSON-RPC
 /// `session/prompt` result/error before treating the turn as successfully done.
 /// Official subscription failures often emit prompt_complete first, then error.
@@ -1675,6 +1830,11 @@ impl AcpClient {
                     });
                     // Grace period: free waiters only if the RPC result never arrives.
                     self.schedule_prompt_complete_fallback(stop);
+                } else if let Some(ev) = decode_mcp_notification(method, msg.get("params")) {
+                    // MCP lifecycle pushes are the CLI's authoritative live status.
+                    // Forward them so `/mcp` reflects the real session instead of
+                    // requiring a manual doctor run.
+                    let _ = self.event_tx.send(ev);
                 } else {
                     debug!("acp notification ignored method={method}");
                 }
@@ -2693,6 +2853,20 @@ impl AcpClient {
             .await
     }
 
+    /// Return the current session's cached MCP status catalog.
+    ///
+    /// This calls the agent's read-only `x.ai/mcp/list { cache: true }`
+    /// extension. It neither starts MCP servers nor runs the long doctor probe.
+    pub async fn mcp_list_cached(&self) -> Result<Value, String> {
+        let sid = self
+            .agent_session_id
+            .lock()
+            .clone()
+            .ok_or_else(|| "no session".to_string())?;
+        self.request("x.ai/mcp/list", json!({ "sessionId": sid, "cache": true }))
+            .await
+    }
+
     /// List rewind points (one per user prompt). Grok extension `x.ai/rewind/points`.
     pub async fn rewind_points(&self) -> Result<Value, String> {
         let sid = self
@@ -3623,6 +3797,98 @@ fn parse_ask_user_options(v: &Value) -> Vec<AskUserOption> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod mcp_notification_decode_tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_known_status_aliases_and_fails_closed() {
+        for status in ["ready", "connected", "ok", "healthy"] {
+            assert_eq!(normalize_mcp_status(status), "ready");
+        }
+        for status in ["needs_auth", "auth_required", "auth_expired"] {
+            assert_eq!(normalize_mcp_status(status), "needsAuth");
+        }
+        for status in ["failed", "error", "disconnected"] {
+            assert_eq!(normalize_mcp_status(status), "unavailable");
+        }
+        assert_eq!(normalize_mcp_status("future_state"), "unknown");
+    }
+
+    #[test]
+    fn decodes_cli_server_status_name_detail_and_tools() {
+        let event = decode_mcp_notification(
+            "_x.ai/mcp/server_status",
+            Some(&json!({
+                "sessionId": "agent-session-only",
+                "name": "filesystem",
+                "source": "local",
+                "status": "connected",
+                "detail": "connected with api_key=should-not-escape",
+                "tools": [{ "name": "read" }, { "name": "write" }],
+            })),
+        );
+        assert!(matches!(
+            event,
+            Some(AcpEvent::McpServerStatus {
+                server,
+                status,
+                reason: Some(reason),
+                tool_count: Some(2),
+            }) if server == "filesystem"
+                && status == "ready"
+                && !reason.contains("should-not-escape")
+        ));
+    }
+
+    #[test]
+    fn status_aliases_and_blank_owner_are_handled_safely() {
+        let event = parse_mcp_server_status(&json!({
+            "serverName": " remote ",
+            "state": "auth_required",
+            "message": " expired ",
+            "toolCount": 9,
+        }));
+        assert!(matches!(
+            event,
+            Some(AcpEvent::McpServerStatus {
+                server,
+                status,
+                reason: Some(reason),
+                tool_count: Some(9),
+            }) if server == "remote" && status == "needsAuth" && reason == "expired"
+        ));
+        assert!(parse_mcp_server_status(&json!({ "name": "   ", "status": "ready" })).is_none());
+    }
+
+    #[test]
+    fn decodes_lifecycle_method_variants() {
+        let progress = decode_mcp_notification(
+            "x.ai/mcp/init_progress",
+            Some(&json!({ "completed": 1, "count": 3 })),
+        );
+        assert!(matches!(
+            progress,
+            Some(AcpEvent::McpInitProgress {
+                connected: Some(1),
+                total: Some(3),
+            })
+        ));
+        assert!(matches!(
+            decode_mcp_notification("x.ai/mcp/initialized", Some(&json!({}))),
+            Some(AcpEvent::McpInitialized)
+        ));
+        assert!(matches!(
+            decode_mcp_notification(
+                "x.ai/mcp/tools_changed",
+                Some(&json!({ "name": " filesystem " })),
+            ),
+            Some(AcpEvent::McpCatalogStale { kind, server: Some(server) })
+                if kind == "tools_changed" && server == "filesystem"
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -15,6 +15,8 @@ use crate::session_fsm::{SessionFsm, SessionState};
 use crate::store::{self, ChatMessageStored, MessageAttachmentStored, SessionMeta};
 use crate::stream_stall::StallTier;
 
+use super::run::ActiveRun;
+
 /// Outcome of one stall-watchdog pass on a single live/background session.
 #[derive(Debug)]
 pub(super) enum StallTickAction {
@@ -93,6 +95,31 @@ pub(super) fn sanitize_error_detail(raw: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpRuntimeServer {
+    pub name: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub tool_count: Option<u32>,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeSnapshot {
+    pub session_id: Option<String>,
+    /// ACP child that produced this evidence; changes force the GUI to discard
+    /// stale health from a retired process even when the App session id is stable.
+    pub process_id: Option<String>,
+    pub initialized: bool,
+    pub connected: Option<u32>,
+    pub total: Option<u32>,
+    pub catalog_stale: bool,
+    pub servers: Vec<McpRuntimeServer>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
     pub session_id: Option<String>,
     pub agent_session_id: Option<String>,
@@ -100,9 +127,27 @@ pub struct SessionSnapshot {
     pub last_error: Option<AgentError>,
     pub streaming_message_id: Option<String>,
     pub backend: String,
+    /// Model the **next** turn will use (composer selection).
     pub model_id: Option<String>,
     pub project_path: Option<String>,
     pub title: String,
+    /// Identity of the run currently in flight, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run_epoch: Option<u64>,
+    /// Model frozen by the in-flight run. Differs from `model_id` when the user
+    /// switched models mid-turn; the UI must show both so a deferred switch is
+    /// never mistaken for one that already took effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_model_id: Option<String>,
+    /// True when `model_id` cannot take effect until the next turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_switch_pending: bool,
+    /// True when the active run's prompt is retained and can be restarted under
+    /// the newly selected model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_restart_active_run: bool,
 }
 
 /// One user-prompt checkpoint for the rewind timeline UI.
@@ -141,6 +186,20 @@ pub struct UiPermissionRequest {
 
 /// Identity for routing ACP event pumps when multiple processes are warm.
 pub(super) type ProcessId = String;
+
+/// The user input of the active run, retained so the same turn can be
+/// re-dispatched after a model switch.
+///
+/// This keeps the **original** user input, not the prepared agent prompt: a
+/// restart under a different model has to redo model-dependent preparation
+/// (Host vision for text-only mains, image block splitting, history bootstrap),
+/// so replaying a prompt prepared for the previous model would be wrong.
+#[derive(Debug, Clone)]
+pub(super) struct PendingRunPrompt {
+    pub(super) text: String,
+    pub(super) display_text: Option<String>,
+    pub(super) attachments: Option<Vec<MessageAttachmentStored>>,
+}
 
 /// Buffered `session://stream` payload awaiting coalesce flush.
 pub(super) struct PendingStreamEmit {
@@ -181,6 +240,18 @@ pub(crate) struct LiveSession {
     /// Model switch requested while a turn was in flight; applied before the
     /// next prompt so the picker never has to block on a busy agent.
     pub(super) pending_model: Option<String>,
+    /// The run currently dispatched for this session, with the config it froze
+    /// at dispatch. `None` between turns.
+    ///
+    /// The active run is authoritative for "which model produced this output":
+    /// `model_id` above is the *next turn's* default and may already have moved
+    /// on while this run is still streaming.
+    pub(super) active_run: Option<ActiveRun>,
+    /// Monotonic per-session dispatch counter (never reset by a turn ending).
+    pub(super) run_epoch_seq: u64,
+    /// Prompt of the active run, kept so the user can switch model and restart
+    /// the same question without retyping it.
+    pub(super) active_run_prompt: Option<PendingRunPrompt>,
     /// Effort applied to the live agent process (from last spawn).
     pub(super) effort: Option<String>,
     /// Product mode: agent | plan | ask (ACP session/set_mode).
@@ -322,6 +393,41 @@ do NOT reprint the transcript in your reply; answer ONLY the new user message be
 
 /// Cap content snippets emitted on live tool events (diff panel).
 pub(super) const TOOL_CONTENT_SNIPPET_MAX: usize = 200_000;
+
+/// Extract a complete textual result from an ACP tool payload without attempting
+/// to stringify media/structured values into lossy UI text. The raw event is
+/// persisted separately by the Host so the timeline can retain a safe preview.
+pub(super) fn extract_tool_result_text(raw: &serde_json::Value) -> Option<String> {
+    const POINTERS: &[&str] = &[
+        "/rawOutput/content",
+        "/rawOutput/text",
+        "/rawOutput/output",
+        "/rawOutput/result",
+        "/rawOutput",
+        "/output",
+        "/result",
+        "/content",
+    ];
+    for pointer in POINTERS {
+        let Some(value) = raw.pointer(pointer) else {
+            continue;
+        };
+        if let Some(text) = value.as_str() {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+            continue;
+        }
+        if !value.is_null() {
+            if let Ok(text) = serde_json::to_string_pretty(value) {
+                if text != "null" && text != "{}" && text != "[]" {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Extract human-visible path + detail from tool_call payload for activity UI.
 /// path includes file paths **and** web_fetch URLs (`rawInput.url`) so reload
@@ -639,6 +745,9 @@ pub(super) fn journal_host_tool_step(
                 is_error: matches!(st, "failed" | "error"),
                 attachments: None,
                 marker: Some("tool_step".into()),
+                tool_artifact_ref: None,
+                tool_output_bytes: None,
+                tool_detail_truncated: false,
             },
         );
     }

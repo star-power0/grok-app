@@ -733,8 +733,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Reserve height so composer doesn't jump when mark appears */
-  min-height: 36px;
+  /* Keep the centered welcome composer stable before account/provider brand hydration. */
+  height: 52px;
+  min-height: 52px;
   padding: 4px 8px 8px;
   user-select: none;
   flex-shrink: 0;

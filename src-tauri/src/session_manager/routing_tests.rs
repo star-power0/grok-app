@@ -134,6 +134,9 @@ fn sample_live_for_empty_run(body: &str, thought: &str, tools: u32, mode: &str) 
         stream_attachments: Vec::new(),
         model_id: None,
         pending_model: None,
+        active_run: None,
+        run_epoch_seq: 0,
+        active_run_prompt: None,
         effort: None,
         product_mode: Some(mode.into()),
         project_path: None,
@@ -230,6 +233,9 @@ fn journal_assistant_after_last_user_detects_answered_turn() {
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         },
     );
     assert!(!SessionManager::journal_has_assistant_after_last_user(sid));
@@ -244,6 +250,9 @@ fn journal_assistant_after_last_user_detects_answered_turn() {
             is_error: false,
             attachments: None,
             marker: None,
+            tool_artifact_ref: None,
+            tool_output_bytes: None,
+            tool_detail_truncated: false,
         },
     );
     assert!(SessionManager::journal_has_assistant_after_last_user(sid));
@@ -310,6 +319,9 @@ fn interjection_starts_host_owned_stream_segment() {
         stream_attachments: Vec::new(),
         model_id: None,
         pending_model: None,
+        active_run: None,
+        run_epoch_seq: 0,
+        active_run_prompt: None,
         effort: None,
         product_mode: None,
         project_path: None,
@@ -356,25 +368,113 @@ fn interjection_starts_host_owned_stream_segment() {
         Some(post_id.as_str())
     );
 
+    // The run the guidance was accepted for.
+    let run = SessionManager::open_run_locked(
+        &mut session,
+        Some("turn-1".into()),
+        Some("model-a".into()),
+        Some("site-a".into()),
+    );
     assert!(SessionManager::is_interjection_turn_active(
         &session,
         "session-1",
-        "turn-1",
+        &run,
     ));
     assert!(!SessionManager::is_interjection_turn_active(
         &session,
         "session-2",
-        "turn-1",
+        &run,
     ));
-    session.prompt_in_flight = false;
-    session.fsm.end_stream().unwrap();
-    session.active_turn_id = None;
+
+    // A restart keeps the turn id but supersedes the epoch. Guidance accepted by
+    // the cancelled run must not split the replacement run's assistant row.
+    let restarted = SessionManager::open_run_locked(
+        &mut session,
+        Some("turn-1".into()),
+        Some("model-b".into()),
+        Some("site-a".into()),
+    );
+    assert_eq!(restarted.turn_id, run.turn_id);
+    assert!(restarted.run_epoch > run.run_epoch);
     assert!(!SessionManager::is_interjection_turn_active(
         &session,
         "session-1",
-        "turn-1",
+        &run,
+    ));
+    assert!(SessionManager::is_interjection_turn_active(
+        &session,
+        "session-1",
+        &restarted,
+    ));
+
+    session.prompt_in_flight = false;
+    session.fsm.end_stream().unwrap();
+    SessionManager::close_run_locked(&mut session);
+    assert!(!SessionManager::is_interjection_turn_active(
+        &session,
+        "session-1",
+        &restarted,
     ));
     let _ = mgr; // keep manager constructed for parity with other tests
+}
+
+#[test]
+fn a_closed_run_does_not_reset_the_epoch_counter() {
+    // Reusing an epoch after a turn ends would make a late event from the old
+    // run indistinguishable from the new one.
+    let mut session = streaming_session_for_replay_test();
+    let first = SessionManager::open_run_locked(&mut session, None, None, None);
+    SessionManager::close_run_locked(&mut session);
+    assert!(session.active_run.is_none());
+    assert!(session.active_run_prompt.is_none());
+    let second = SessionManager::open_run_locked(&mut session, None, None, None);
+    assert!(second.run_epoch > first.run_epoch);
+    assert_ne!(second.turn_id, first.turn_id);
+}
+
+#[test]
+fn a_run_freezes_the_config_in_force_at_dispatch() {
+    let mut session = streaming_session_for_replay_test();
+    session.model_id = Some("model-a".into());
+    session.effort = Some("high".into());
+    let run = SessionManager::open_run_locked(
+        &mut session,
+        None,
+        Some("agent-model-a".into()),
+        Some("site-a".into()),
+    );
+    // Switching afterwards must not retroactively relabel the running turn.
+    session.model_id = Some("model-b".into());
+    session.effort = Some("low".into());
+    let frozen = session.active_run.as_ref().expect("active run");
+    assert_eq!(frozen.config.model_id.as_deref(), Some("model-a"));
+    assert_eq!(frozen.config.effort.as_deref(), Some("high"));
+    assert_eq!(
+        frozen.config.agent_model_id.as_deref(),
+        Some("agent-model-a")
+    );
+    assert_eq!(frozen.config.provider_id.as_deref(), Some("site-a"));
+    assert_eq!(frozen.run_epoch, run.run_epoch);
+}
+
+#[test]
+fn snapshot_reports_running_and_next_model_separately() {
+    let mut session = streaming_session_for_replay_test();
+    session.model_id = Some("model-a".into());
+    SessionManager::open_run_locked(&mut session, None, Some("model-a".into()), None);
+    let same = SessionManager::snapshot_from_live(&session);
+    assert!(!same.model_switch_pending);
+    assert_eq!(same.running_model_id.as_deref(), Some("model-a"));
+
+    // Mid-turn switch: the picker shows model-b, the run still uses model-a.
+    session.model_id = Some("model-b".into());
+    let switched = SessionManager::snapshot_from_live(&session);
+    assert!(switched.model_switch_pending);
+    assert_eq!(switched.running_model_id.as_deref(), Some("model-a"));
+    assert_eq!(switched.model_id.as_deref(), Some("model-b"));
+    assert!(switched.active_turn_id.is_some());
+    // No retained prompt on this hand-built session → not restartable.
+    assert!(!switched.can_restart_active_run);
 }
 
 #[test]
@@ -426,6 +526,9 @@ fn pick_interjection_target_rejects_non_streaming_session() {
         stream_attachments: Vec::new(),
         model_id: None,
         pending_model: None,
+        active_run: None,
+        run_epoch_seq: 0,
+        active_run_prompt: None,
         effort: None,
         product_mode: None,
         project_path: None,

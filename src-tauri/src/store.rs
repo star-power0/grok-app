@@ -645,6 +645,15 @@ pub struct ChatMessageStored {
     /// UI marker type, e.g. `context_compact` for agent auto/manual compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<String>,
+    /// Opaque session-local reference to the complete Host-owned tool output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_artifact_ref: Option<String>,
+    /// Full output size before the timeline preview was capped/redacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_bytes: Option<usize>,
+    /// Whether `content`/tool detail is a preview rather than the full result.
+    #[serde(default)]
+    pub tool_detail_truncated: bool,
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &PathBuf) -> T {

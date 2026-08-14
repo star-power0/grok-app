@@ -143,6 +143,8 @@ export const zhTWComposer = {
   "composer.modelGroupOfficial": "官方",
   "composer.modelSearchPlaceholder": "搜尋模型…",
   "composer.modelSearchEmpty": "沒有符合的模型",
+  "composer.modelAppliesNextTurn": "下一輪生效——本輪仍用原模型跑完。",
+  "composer.modelAppliesNextTurnFrom": "下一輪生效——本輪仍在使用 {model}。",
   "composer.effort": "推理強度",
   "composer.mode": "模式",
   "composer.permission": "授權",
