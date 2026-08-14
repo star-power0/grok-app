@@ -15,6 +15,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
       { id: "composer", labelKey: "settings.tab.composer" },
       { id: "permissions", labelKey: "settings.tab.permissions" },
       { id: "agent", labelKey: "settings.tab.agent" },
+      { id: "compatibility", labelKey: "settings.tab.compatibility" },
       { id: "app", labelKey: "settings.tab.app" },
     ],
   },

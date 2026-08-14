@@ -38,6 +38,7 @@ export type SettingsTabId =
   | "composer"
   | "permissions"
   | "agent"
+  | "compatibility"
   | "app"
   // appearance
   | "theme"

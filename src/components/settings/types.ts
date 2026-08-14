@@ -252,6 +252,42 @@ export interface SettingsPageProps {
   onOpenShortcutsHelp?: () => void;
   onOpenProductTutorial?: () => void;
   trustedProjects?: Array<{ id: string; name: string; path: string }>;
+  compatClaudeSkills?: boolean;
+  compatClaudeMcps?: boolean;
+  compatClaudeAgents?: boolean;
+  compatClaudeRules?: boolean;
+  compatClaudeHooks?: boolean;
+  compatClaudeSessions?: boolean;
+  compatCursorSkills?: boolean;
+  compatCursorMcps?: boolean;
+  compatCursorAgents?: boolean;
+  compatCursorRules?: boolean;
+  compatCursorHooks?: boolean;
+  compatCursorSessions?: boolean;
+  compatCodexSkills?: boolean;
+  compatCodexMcps?: boolean;
+  compatCodexAgents?: boolean;
+  compatCodexRules?: boolean;
+  compatCodexHooks?: boolean;
+  compatCodexSessions?: boolean;
+  onCompatClaudeSkills?: (v: boolean) => void;
+  onCompatClaudeMcps?: (v: boolean) => void;
+  onCompatClaudeAgents?: (v: boolean) => void;
+  onCompatClaudeRules?: (v: boolean) => void;
+  onCompatClaudeHooks?: (v: boolean) => void;
+  onCompatClaudeSessions?: (v: boolean) => void;
+  onCompatCursorSkills?: (v: boolean) => void;
+  onCompatCursorMcps?: (v: boolean) => void;
+  onCompatCursorAgents?: (v: boolean) => void;
+  onCompatCursorRules?: (v: boolean) => void;
+  onCompatCursorHooks?: (v: boolean) => void;
+  onCompatCursorSessions?: (v: boolean) => void;
+  onCompatCodexSkills?: (v: boolean) => void;
+  onCompatCodexMcps?: (v: boolean) => void;
+  onCompatCodexAgents?: (v: boolean) => void;
+  onCompatCodexRules?: (v: boolean) => void;
+  onCompatCodexHooks?: (v: boolean) => void;
+  onCompatCodexSessions?: (v: boolean) => void;
 }
 
 /**

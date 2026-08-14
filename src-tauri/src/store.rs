@@ -451,6 +451,46 @@ pub struct AppSettings {
     /// Applied on write/rotate and via explicit prune. Default **0** (unlimited).
     #[serde(default)]
     pub audit_ledger_retention_days: u32,
+    /// Compatibility flags for loading resources from other IDEs/editors.
+    /// When a flag is true, Grok scans `~/.{ide}/` directories for skills,
+    /// MCP configs, agents, rules, hooks, and sessions. Default all true
+    /// for Claude, all true for Cursor, sessions-only for Codex.
+    #[serde(default)]
+    pub compat_claude_skills: bool,
+    #[serde(default)]
+    pub compat_claude_mcps: bool,
+    #[serde(default)]
+    pub compat_claude_agents: bool,
+    #[serde(default)]
+    pub compat_claude_rules: bool,
+    #[serde(default)]
+    pub compat_claude_hooks: bool,
+    #[serde(default)]
+    pub compat_claude_sessions: bool,
+    #[serde(default)]
+    pub compat_cursor_skills: bool,
+    #[serde(default)]
+    pub compat_cursor_mcps: bool,
+    #[serde(default)]
+    pub compat_cursor_agents: bool,
+    #[serde(default)]
+    pub compat_cursor_rules: bool,
+    #[serde(default)]
+    pub compat_cursor_hooks: bool,
+    #[serde(default)]
+    pub compat_cursor_sessions: bool,
+    #[serde(default)]
+    pub compat_codex_skills: bool,
+    #[serde(default)]
+    pub compat_codex_mcps: bool,
+    #[serde(default)]
+    pub compat_codex_agents: bool,
+    #[serde(default)]
+    pub compat_codex_rules: bool,
+    #[serde(default)]
+    pub compat_codex_hooks: bool,
+    #[serde(default)]
+    pub compat_codex_sessions: bool,
 }
 
 fn default_composer_prefs_scope() -> String {
@@ -589,6 +629,25 @@ impl Default for AppSettings {
             allow_unverified_cli_install: false,
             last_cli_checksum_verified: None,
             audit_ledger_retention_days: 0,
+            // Default compat flags: Claude/Cursor all enabled, Codex sessions-only.
+            compat_claude_skills: true,
+            compat_claude_mcps: true,
+            compat_claude_agents: true,
+            compat_claude_rules: true,
+            compat_claude_hooks: true,
+            compat_claude_sessions: true,
+            compat_cursor_skills: true,
+            compat_cursor_mcps: true,
+            compat_cursor_agents: true,
+            compat_cursor_rules: true,
+            compat_cursor_hooks: true,
+            compat_cursor_sessions: true,
+            compat_codex_skills: false,
+            compat_codex_mcps: false,
+            compat_codex_agents: false,
+            compat_codex_rules: false,
+            compat_codex_hooks: false,
+            compat_codex_sessions: true,
         }
     }
 }

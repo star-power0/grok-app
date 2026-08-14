@@ -3,6 +3,7 @@
  */
 import { useSettingsModel } from "@/providers/SettingsModelContext";
 import type { SettingsViewModel } from "./types";
+import { CompatibilitySection } from "./CompatibilitySection";
 
 import { Select } from "@/components/Select";
 import {
@@ -1729,6 +1730,12 @@ export function GeneralSection() {
                 <AgentConfigEditPanel locale={resolveLocale(locale)} />
               </div>
             </div>
+            </>
+            )}
+
+            {activeTab === "compatibility" && (
+            <>
+              <CompatibilitySection />
             </>
             )}
 

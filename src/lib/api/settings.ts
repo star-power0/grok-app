@@ -201,6 +201,27 @@ export interface AppSettings {
    * Applied on write/rotate and explicit prune. Default 0.
    */
   auditLedgerRetentionDays?: number;
+  
+  // Compatibility flags for loading resources from other IDEs/editors.
+  // When true, Grok scans ~/.{ide}/ directories for skills/MCP/agents/rules/hooks/sessions.
+  compatClaudeSkills?: boolean;
+  compatClaudeMcps?: boolean;
+  compatClaudeAgents?: boolean;
+  compatClaudeRules?: boolean;
+  compatClaudeHooks?: boolean;
+  compatClaudeSessions?: boolean;
+  compatCursorSkills?: boolean;
+  compatCursorMcps?: boolean;
+  compatCursorAgents?: boolean;
+  compatCursorRules?: boolean;
+  compatCursorHooks?: boolean;
+  compatCursorSessions?: boolean;
+  compatCodexSkills?: boolean;
+  compatCodexMcps?: boolean;
+  compatCodexAgents?: boolean;
+  compatCodexRules?: boolean;
+  compatCodexHooks?: boolean;
+  compatCodexSessions?: boolean;
 }
 
 export interface ReasoningEffort {
