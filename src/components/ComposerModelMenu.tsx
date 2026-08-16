@@ -6,6 +6,8 @@
  */
 
 import {
+  memo,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -34,7 +36,6 @@ import {
   type ComposerProviderInput,
 } from "@/lib/composerModelGroups";
 import { composerModelChipLabel } from "@/lib/effectiveModel";
-import { Tip } from "@/components/ui/tooltip";
 import {
   IconAlertTriangle,
   IconBolt,
@@ -47,7 +48,15 @@ import {
   IconShield,
   IconShieldCheck,
 } from "@/components/icons";
-import { useFloatingMenu, type FloatingPos } from "@/lib/floatingMenu";
+import {
+  FLOATING_MENU_Z_INDEX,
+  useFloatingMenu,
+  type FloatingPos,
+} from "@/lib/floatingMenu";
+import {
+  acquireNativeWebviewCover,
+  rectOverlapsNativeWebviewHost,
+} from "@/lib/nativeWebviewCover";
 
 type Nested = "model" | "effort" | null;
 
@@ -201,7 +210,6 @@ function MenuShell({
         )
       : null;
 
-  const tipLabel = title ?? ariaLabel;
   const trigger = (
     <button
       ref={triggerRef}
@@ -211,6 +219,7 @@ function MenuShell({
       aria-expanded={open}
       aria-controls={popId}
       aria-label={ariaLabel}
+      title={title}
       onClick={() => {
         const next = !open;
         onOpenChange?.(next);
@@ -241,7 +250,7 @@ function MenuShell({
       ref={rootRef}
       className={`cmm ${open ? "is-open" : ""} ${danger ? "cmm--danger" : ""} ${className}`.trim()}
     >
-      {tipLabel ? <Tip label={tipLabel}>{trigger}</Tip> : trigger}
+      {trigger}
       {panel}
     </div>
   );
@@ -315,7 +324,7 @@ function resolveEffortLabel(
   return effortDisplayLabel(slot ?? spawnId, effortI18n(labels));
 }
 
-export function ComposerModelMenu({
+function ComposerModelMenuImpl({
   modelId,
   effort,
   models = GROK_BUILD_MODELS,
@@ -663,7 +672,129 @@ export function ComposerModelMenu({
   );
 }
 
+/**
+ * Memo boundary (pairs with the open-time snapshot inside the component):
+ * the snapshot stops catalog updates from re-anchoring an open panel, and this
+ * stops unrelated AppWorkbench renders from re-rendering the menu at all.
+ */
+export const ComposerModelMenu = memo(ComposerModelMenuImpl);
+
 /* ---------- Access: mode + permission (Codex-style one entry) ---------- */
+
+/**
+ * Access panel height estimate used for the pre-mount flip/anchor decision.
+ *
+ * Derived from the rendered structure rather than guessed: one hint header,
+ * two section labels, and nine rich two-line rows (3 modes + 6 policies).
+ * `.cmm__pop` caps the panel at `min(480px, 100vh - 24px)`, so the estimate is
+ * clamped to that ceiling — going higher would flip the menu on tall screens
+ * even though the panel can never render that large.
+ */
+const ACCESS_SHEET_WIDTH = 420;
+const ACCESS_SHEET_MAX_HEIGHT = 640;
+const ACCESS_SHEET_MARGIN = 8;
+const ACCESS_SHEET_GAP = 8;
+
+type AccessSheetRect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+/**
+ * Resolve the access picker in one pass. Unlike small dropdowns, this sheet is
+ * taller than the space above the composer on many desktop layouts. Its box is
+ * therefore fixed before it is mounted instead of being measured and re-anchored
+ * after the first paint.
+ */
+export function computeAccessSheetRect(
+  trigger: Pick<DOMRect, "left" | "right" | "top" | "bottom">,
+  viewportWidth: number,
+  viewportHeight: number,
+): AccessSheetRect {
+  const usableWidth = Math.max(1, viewportWidth - ACCESS_SHEET_MARGIN * 2);
+  const usableHeight = Math.max(1, viewportHeight - ACCESS_SHEET_MARGIN * 2);
+  const width = Math.min(ACCESS_SHEET_WIDTH, usableWidth);
+  const height = Math.min(ACCESS_SHEET_MAX_HEIGHT, usableHeight);
+  const left = Math.max(
+    ACCESS_SHEET_MARGIN,
+    Math.min(trigger.right - width, viewportWidth - ACCESS_SHEET_MARGIN - width),
+  );
+  const aboveTop = trigger.top - ACCESS_SHEET_GAP - height;
+  const top = aboveTop >= ACCESS_SHEET_MARGIN ? aboveTop : ACCESS_SHEET_MARGIN;
+
+  return { left, top, width, height };
+}
+
+function viewportSize() {
+  return {
+    width: typeof window === "undefined" ? 1024 : window.innerWidth,
+    height: typeof window === "undefined" ? 768 : window.innerHeight,
+  };
+}
+
+/**
+ * Fixed access sheet lifecycle. It deliberately does not observe the trigger,
+ * composer ancestors, or panel content while open: the open sheet must remain
+ * visually still even while surrounding chat state changes.
+ */
+function useAccessSheet() {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<AccessSheetRect | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const sheetId = useId();
+
+  const positionFromTrigger = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const viewport = viewportSize();
+    setRect(computeAccessSheetRect(trigger.getBoundingClientRect(), viewport.width, viewport.height));
+  }, []);
+
+  const openSheet = useCallback(() => {
+    positionFromTrigger();
+    setOpen(true);
+  }, [positionFromTrigger]);
+
+  const closeSheet = useCallback(() => {
+    setOpen(false);
+    setRect(null);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    let frame: number | null = null;
+    const onResize = () => {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        positionFromTrigger();
+      });
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) || sheetRef.current?.contains(target)) return;
+      closeSheet();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeSheet();
+    };
+    window.addEventListener("resize", onResize);
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      if (frame != null) cancelAnimationFrame(frame);
+      window.removeEventListener("resize", onResize);
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeSheet, open, positionFromTrigger]);
+
+  return { closeSheet, open, openSheet, rect, rootRef, sheetId, sheetRef, triggerRef };
+}
 
 export interface ComposerAccessMenuProps {
   mode: string;
@@ -797,87 +928,156 @@ function modeIcon(id: string) {
   return <IconRobot size={18} />;
 }
 
-export function ComposerAccessMenu({
+function ComposerAccessMenuImpl({
   mode,
   policy,
   labels,
   onMode,
   onPolicy,
 }: ComposerAccessMenuProps) {
-  const menu = usePortalMenu(420, 320);
+  const sheet = useAccessSheet();
   const isDanger = policy === "always_approve";
   const full = policyLabel(policy, labels);
   const short = policyShort(policy, labels);
   const title = `${labels.mode}: ${modeLabel(mode, labels)} · ${labels.permission}: ${full}`;
 
+  useEffect(() => {
+    if (!sheet.open || !sheet.rect) return;
+    const rect = sheet.rect;
+    if (
+      !rectOverlapsNativeWebviewHost({
+        left: rect.left,
+        top: rect.top,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        width: rect.width,
+        height: rect.height,
+      })
+    ) {
+      return;
+    }
+    return acquireNativeWebviewCover();
+  }, [sheet.open, sheet.rect]);
+
+  const panel =
+    sheet.open && sheet.rect && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={sheet.sheetRef}
+            className="cmm__pop cmm__pop--portal cmm__pop--access-sheet"
+            id={sheet.sheetId}
+            role="dialog"
+            aria-label={labels.access}
+            style={{
+              height: sheet.rect.height,
+              left: sheet.rect.left,
+              top: sheet.rect.top,
+              width: sheet.rect.width,
+              zIndex: FLOATING_MENU_Z_INDEX,
+            }}
+          >
+            <div className="cmm__header">
+              <div className="cmm__header-title">{labels.accessHint}</div>
+            </div>
+
+            <div className="cmm__section">{labels.mode}</div>
+            {SESSION_MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className={"cmm__opt cmm__opt--rich" + (m.id === mode ? " is-active" : "")}
+                onClick={() => onMode(m.id)}
+              >
+                <span className="cmm__opt-icon" aria-hidden>
+                  {modeIcon(m.id)}
+                </span>
+                <span className="cmm__opt-main">
+                  <span className="cmm__opt-title">{modeLabel(m.id, labels)}</span>
+                  <span className="cmm__opt-desc">{modeDesc(m.id, labels)}</span>
+                </span>
+                {m.id === mode && (
+                  <span className="cmm__opt-check" aria-hidden>
+                    <IconCheck size={16} />
+                  </span>
+                )}
+              </button>
+            ))}
+
+            <div className="cmm__section cmm__section--gap">{labels.permission}</div>
+            {PERMISSION_POLICIES.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={
+                  "cmm__opt cmm__opt--rich" +
+                  (p.id === policy ? " is-active" : "") +
+                  (p.dangerous ? " is-danger" : "")
+                }
+                onClick={() => {
+                  onPolicy(p.id);
+                  sheet.closeSheet();
+                }}
+              >
+                <span className="cmm__opt-icon" aria-hidden>
+                  {policyIcon(p.id)}
+                </span>
+                <span className="cmm__opt-main">
+                  <span className="cmm__opt-title">{policyLabel(p.id, labels)}</span>
+                  <span className="cmm__opt-desc">{policyDesc(p.id, labels)}</span>
+                </span>
+                {p.id === policy && (
+                  <span className="cmm__opt-check" aria-hidden>
+                    <IconCheck size={16} />
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
-    <MenuShell
-      {...menu}
-      className="cmm--access"
-      triggerIcon={policyIcon(policy)}
-      triggerText={full}
-      triggerShort={short}
-      ariaLabel={labels.access}
-      title={title}
-      danger={isDanger}
+    <div
+      ref={sheet.rootRef}
+      className={`cmm ${sheet.open ? "is-open" : ""} ${isDanger ? "cmm--danger" : ""} cmm--access`.trim()}
     >
-      <div className="cmm__header">
-        <div className="cmm__header-title">{labels.accessHint}</div>
-      </div>
-
-      <div className="cmm__section">{labels.mode}</div>
-      {SESSION_MODES.map((m) => (
-        <button
-          key={m.id}
-          type="button"
-          className={"cmm__opt cmm__opt--rich" + (m.id === mode ? " is-active" : "")}
-          onClick={() => onMode(m.id)}
-        >
-          <span className="cmm__opt-icon" aria-hidden>
-            {modeIcon(m.id)}
-          </span>
-          <span className="cmm__opt-main">
-            <span className="cmm__opt-title">{modeLabel(m.id, labels)}</span>
-            <span className="cmm__opt-desc">{modeDesc(m.id, labels)}</span>
-          </span>
-          {m.id === mode && (
-            <span className="cmm__opt-check" aria-hidden>
-              <IconCheck size={16} />
-            </span>
-          )}
-        </button>
-      ))}
-
-      <div className="cmm__section cmm__section--gap">{labels.permission}</div>
-      {PERMISSION_POLICIES.map((p) => (
-        <button
-          key={p.id}
-          type="button"
-          className={
-            "cmm__opt cmm__opt--rich" +
-            (p.id === policy ? " is-active" : "") +
-            (p.dangerous ? " is-danger" : "")
+      <button
+        ref={sheet.triggerRef}
+        type="button"
+        className="cmm__trigger"
+        aria-haspopup="dialog"
+        aria-expanded={sheet.open}
+        aria-controls={sheet.sheetId}
+        aria-label={labels.access}
+        title={title}
+        onClick={() => {
+          if (sheet.open) {
+            sheet.closeSheet();
+          } else {
+            sheet.openSheet();
           }
-          onClick={() => {
-            onPolicy(p.id);
-            menu.setOpen(false);
-          }}
-        >
-          <span className="cmm__opt-icon" aria-hidden>
-            {policyIcon(p.id)}
-          </span>
-          <span className="cmm__opt-main">
-            <span className="cmm__opt-title">{policyLabel(p.id, labels)}</span>
-            <span className="cmm__opt-desc">{policyDesc(p.id, labels)}</span>
-          </span>
-          {p.id === policy && (
-            <span className="cmm__opt-check" aria-hidden>
-              <IconCheck size={16} />
-            </span>
-          )}
-        </button>
-      ))}
-    </MenuShell>
+        }}
+      >
+        <span className="cmm__icon" aria-hidden>
+          {policyIcon(policy)}
+        </span>
+        <span className="cmm__trigger-text cmm__trigger-text--full">{full}</span>
+        <span className="cmm__trigger-text cmm__trigger-text--short">{short}</span>
+        <span className="cmm__chev" aria-hidden>
+          <IconChevronDown size={12} />
+        </span>
+      </button>
+      {panel}
+    </div>
   );
 }
+
+/**
+ * Memo boundary: the composer sits inside AppWorkbench, so unrelated state
+ * (streaming, toasts, timers) re-rendered this panel and re-measured it while
+ * open. Callers pass a memoized `labels` bag and stable handlers, so the panel
+ * now only re-renders when mode/policy/locale actually change.
+ */
+export const ComposerAccessMenu = memo(ComposerAccessMenuImpl);
 

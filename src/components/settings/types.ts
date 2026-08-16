@@ -252,6 +252,9 @@ export interface SettingsPageProps {
   onOpenShortcutsHelp?: () => void;
   onOpenProductTutorial?: () => void;
   trustedProjects?: Array<{ id: string; name: string; path: string }>;
+  compatibilityEnabled?: boolean;
+  compatibilityIndeterminate?: boolean;
+  onCompatibilityEnabled?: (v: boolean) => void;
   compatClaudeSkills?: boolean;
   compatClaudeMcps?: boolean;
   compatClaudeAgents?: boolean;

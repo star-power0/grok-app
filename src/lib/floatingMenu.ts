@@ -280,7 +280,11 @@ export function useFloatingMenu({
     const el = triggerRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setTriggerW(r.width);
+    // Only publish a real width change. An unconditional write re-rendered the
+    // hook consumer on every measurement, and the ancestor ResizeObserver then
+    // measured again — a measure/render feedback loop the user saw as the open
+    // menu flickering. Sub-pixel jitter is ignored for the same reason.
+    setTriggerW((prev) => (Math.abs(prev - r.width) < 0.5 ? prev : r.width));
     const o = optsRef.current;
     const gap = o.gap ?? 6;
     const margin = 8;
@@ -365,18 +369,30 @@ export function useFloatingMenu({
     }
     // First pass: position estimate (panel may not exist yet).
     update(false);
+    // Coalesce scroll/resize re-anchoring into one frame. Capture-phase scroll
+    // fires many times per gesture; measuring layout synchronously on each event
+    // made trackpad scrolling and menu interaction feel sluggish.
+    let frame: number | null = null;
+    const scheduleUpdate = () => {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update(true);
+      });
+    };
     // Ignore scrolls that originate inside the panel (list keyboard/filter
     // scrolling). Those used to re-anchor the menu every frame → flicker.
     const onScroll = (e: Event) => {
       const t = e.target;
       if (t instanceof Node && panelRef.current?.contains(t)) return;
-      update(true);
+      scheduleUpdate();
     };
-    const onResize = () => update(true);
+    const onResize = () => scheduleUpdate();
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
 
     return () => {
+      if (frame != null) cancelAnimationFrame(frame);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
     };
@@ -447,19 +463,27 @@ export function useFloatingMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, ...deps]);
 
+  // Callers pass fresh `onClose` / `roots` identities every render; bridging
+  // them through refs keeps the dismiss listeners registered once per open
+  // instead of tearing down and re-adding them on unrelated re-renders.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const rootsRef = useRef(roots);
+  rootsRef.current = roots;
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
       if (triggerRef.current?.contains(t)) return;
       if (panelRef.current?.contains(t)) return;
-      for (const r of roots) {
+      for (const r of rootsRef.current) {
         if (r.current?.contains(t)) return;
       }
-      onClose();
+      onCloseRef.current();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -467,7 +491,7 @@ export function useFloatingMenu({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, onClose, triggerRef, panelRef, roots]);
+  }, [open, triggerRef, panelRef]);
 
   /**
    * Tauri native Webviews paint above HTML. If this panel overlaps a browser

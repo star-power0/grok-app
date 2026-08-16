@@ -939,13 +939,15 @@ pub fn prepare_route_auth_for_agent() {
             }
         }
     }
-    // Never import Claude/Cursor MCP catalogs into App agent-home sessions.
-    let mode = crate::store::load_settings().session_data_mode;
-    if let Err(e) = crate::agent_home_config::apply_compat_mcp_disabled(&mode) {
-        tracing::warn!(
-            target: "providers",
-            "compat.claude/cursor mcps=false pin failed: {e}"
-        );
+    // Keep the App-owned independent agent profile aligned with the explicit
+    // Compatibility settings. Shared mode is a no-op by design so user-owned
+    // ~/.grok/config.toml remains untouched.
+    let settings = crate::store::load_settings();
+    if let Err(e) = crate::agent_home_config::sync_compatibility_to_agent_profile(
+        &settings.session_data_mode,
+        &settings,
+    ) {
+        tracing::warn!(target: "providers", "compatibility profile sync failed: {e}");
     }
 }
 

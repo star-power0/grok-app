@@ -515,14 +515,11 @@ pub(crate) fn run_grok_headless(
         .arg("--output-format")
         .arg("json");
     // Headless background-wait policy (CLI 0.2.117+); soft-fail older builds.
+    let settings = crate::store::load_settings();
+    let ver = crate::cli_probe::read_version_of(std::path::Path::new(cli_path));
+    for a in crate::acp_client::background_wait_spawn_flags_from_settings(&settings, ver.as_deref())
     {
-        let settings = crate::store::load_settings();
-        let ver = crate::cli_probe::read_version_of(std::path::Path::new(cli_path));
-        for a in
-            crate::acp_client::background_wait_spawn_flags_from_settings(&settings, ver.as_deref())
-        {
-            cmd.arg(a);
-        }
+        cmd.arg(a);
     }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -531,6 +528,10 @@ pub(crate) fn run_grok_headless(
     if let Some(path_env) = process_util::enriched_path_env() {
         cmd.env("PATH", path_env);
     }
+    let grok_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
+    let _ = std::fs::create_dir_all(&grok_home);
+    cmd.env("GROK_HOME", &grok_home);
+    crate::agent_home_config::apply_compatibility_to_std_command(&mut cmd, &settings);
     proxy::apply_to_std_command(&mut cmd);
 
     let started = Instant::now();

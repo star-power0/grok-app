@@ -495,6 +495,8 @@ export const enSettingsUi = {
   "settings.netProbe.empty.errorHint": "Host invoke failed. Retry, or check that the desktop app is up to date. This is not a full network diagnosis.",
   "settings.section.compatibility": "Third-party IDE Compatibility",
   "settings.compatibility.desc": "Control which external IDE/editor config directories Grok scans for skills, MCP servers, agents, rules, hooks, and sessions. Disabling unused entries speeds up startup.",
+  "settings.compatibility.master": "Enable third-party IDE compatibility",
+  "settings.compatibility.master.desc": "Turn this off for pure Grok mode. Turn it on to enable every compatibility source currently supported by Grok Build.",
   "settings.compatibility.skills": "Skills",
   "settings.compatibility.skills.desc": "Scan for SKILL.md files in the IDE's skills directory.",
   "settings.compatibility.mcps": "MCP Servers",
@@ -506,5 +508,6 @@ export const enSettingsUi = {
   "settings.compatibility.hooks": "Hooks",
   "settings.compatibility.hooks.desc": "Load lifecycle hooks from the IDE's hooks directory.",
   "settings.compatibility.sessions": "Sessions",
-  "settings.compatibility.sessions.desc": "Import past sessions from the IDE's session history.",
+  "settings.compatibility.sessions.desc": "Enable the CLI's staged vendor-session compatibility surface; import discovery activates when a scanner is available.",
+  "settings.compatibility.reserved.desc": "Reserved: Grok Build does not yet consume this Codex resource type.",
 } as const;

@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.8] - 2026-08-15
+
+### Added
+- Added a persisted compatibility master switch with per-vendor controls for Claude, Cursor, and the currently supported Codex sessions surface.
+- Independent session-data mode now synchronizes the selected compatibility profile into the agent-home configuration.
+
+### Fixed
+- Reworked the Composer access picker as a fixed, single-pass sheet with stable viewport geometry, reserved scrollbar space, and native-webview overlap handling.
+- Reduced Composer model/access menu re-render and positioning churn during hydration and permission changes.
+- Release builds now explicitly enable Tauri custom protocol and validate the embedded frontend and NSIS artifact before deployment.
+
+### Validation boundary
+- The compatibility controls are persisted and passed through the supported agent profile and MCP spawn paths. Codex non-session resources are visibly reserved until a corresponding runtime consumer exists.
+- Windows host `cargo test --lib` remains unavailable in this environment when the test binary starts (`STATUS_ENTRYPOINT_NOT_FOUND`); typecheck, lint, targeted frontend tests, Rust checks, and release builds are used as applicable.
 
 ## [0.2.7] - 2026-08-13
 

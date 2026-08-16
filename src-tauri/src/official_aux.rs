@@ -249,6 +249,7 @@ pub fn run_official_headless(
         .arg("--output-format")
         .arg("plain");
     cmd.env("GROK_HOME", &home);
+    crate::agent_home_config::apply_compatibility_to_std_command(&mut cmd, &settings);
     // Official profile only — do not leak these into the DeepSeek agent process.
     cmd.env("GROK_WEB_SEARCH_MODEL", OFFICIAL_CATALOG_MODEL);
     cmd.env("GROK_IMAGE_DESCRIPTION_MODEL", OFFICIAL_CATALOG_MODEL);

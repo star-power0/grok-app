@@ -806,6 +806,20 @@
   max-width: min(420px, calc(100vw - 16px));
 }
 
+/* The access picker is a fixed-height sheet, calculated before mounting. It
+ * owns its scrollport so long labels and the scrollbar cannot resize/re-anchor
+ * a body portal after it first appears. */
+.cmm__pop--access-sheet {
+  box-sizing: border-box;
+  max-height: none;
+  min-width: 0;
+  max-width: none;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 /* Portaled to body — escapes all overflow parents */
 .cmm__pop--portal {
   position: fixed;

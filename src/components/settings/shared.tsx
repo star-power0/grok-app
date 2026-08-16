@@ -66,6 +66,7 @@ export function UiCheck({
   label,
   ariaLabel,
   className = "",
+  disabled = false,
 }: {
   checked: boolean;
   indeterminate?: boolean;
@@ -73,6 +74,7 @@ export function UiCheck({
   label?: ReactNode;
   ariaLabel?: string;
   className?: string;
+  disabled?: boolean;
 }) {
   const on = indeterminate || checked;
   return (
@@ -81,16 +83,18 @@ export function UiCheck({
       role="checkbox"
       aria-checked={indeterminate ? "mixed" : checked}
       aria-label={ariaLabel}
+      disabled={disabled}
       className={
         "ui-check" +
         (checked && !indeterminate ? " is-on" : "") +
         (indeterminate ? " is-mixed" : "") +
+        (disabled ? " is-disabled" : "") +
         (className ? ` ${className}` : "")
       }
       onClick={(e) => {
         e.stopPropagation();
         e.preventDefault();
-        onChange();
+        if (!disabled) onChange();
       }}
       onPointerDown={(e) => e.stopPropagation()}
     >

@@ -137,6 +137,10 @@ fn llm_title_via_cli(message: &str) -> Option<String> {
     if let Some(path_env) = crate::process_util::enriched_path_env() {
         cmd.env("PATH", path_env);
     }
+    let grok_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
+    let _ = std::fs::create_dir_all(&grok_home);
+    cmd.env("GROK_HOME", &grok_home);
+    crate::agent_home_config::apply_compatibility_to_std_command(&mut cmd, &settings);
 
     let output = std::thread::spawn(move || cmd.output()).join().ok()?.ok()?;
 

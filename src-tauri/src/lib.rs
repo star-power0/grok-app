@@ -802,6 +802,8 @@ pub fn run() {
 
             commands::settings_set,
 
+            commands::settings_patch_compatibility,
+
             commands::memory_clear,
 
             commands::memory_list,

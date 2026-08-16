@@ -166,18 +166,133 @@ pub fn set_table_bool(text: &str, table: &str, key: &str, value: bool) -> String
     set_table_key(text, table, key, bool_lit(value), false)
 }
 
-/// Pin App agent-home so Grok does **not** merge Claude/Cursor MCP catalogs.
+/// Return process-local compatibility overrides for CLI-supported surfaces.
 ///
-/// Without this, `~/.claude.json` mcpServers (Playwright, open-websearch, …)
-/// are imported by default and stall first-tool discovery for ~30s.
-pub fn ensure_compat_mcp_disabled(text: &str) -> String {
-    let t = set_table_bool(text, "compat.claude", "mcps", false);
-    set_table_bool(&t, "compat.cursor", "mcps", false)
+/// The entries mirror the CLI registry. Claude and Cursor expose all six
+/// surfaces; Codex currently exposes only the staged sessions surface.
+pub fn compatibility_env_pairs(
+    settings: &crate::store::AppSettings,
+) -> [(&'static str, &'static str); 13] {
+    fn bool_env(value: bool) -> &'static str {
+        if value {
+            "true"
+        } else {
+            "false"
+        }
+    }
+
+    [
+        (
+            "GROK_CLAUDE_SKILLS_ENABLED",
+            bool_env(settings.compat_claude_skills),
+        ),
+        (
+            "GROK_CLAUDE_MCPS_ENABLED",
+            bool_env(settings.compat_claude_mcps),
+        ),
+        (
+            "GROK_CLAUDE_AGENTS_ENABLED",
+            bool_env(settings.compat_claude_agents),
+        ),
+        (
+            "GROK_CLAUDE_RULES_ENABLED",
+            bool_env(settings.compat_claude_rules),
+        ),
+        (
+            "GROK_CLAUDE_HOOKS_ENABLED",
+            bool_env(settings.compat_claude_hooks),
+        ),
+        (
+            "GROK_CLAUDE_SESSIONS_ENABLED",
+            bool_env(settings.compat_claude_sessions),
+        ),
+        (
+            "GROK_CURSOR_SKILLS_ENABLED",
+            bool_env(settings.compat_cursor_skills),
+        ),
+        (
+            "GROK_CURSOR_MCPS_ENABLED",
+            bool_env(settings.compat_cursor_mcps),
+        ),
+        (
+            "GROK_CURSOR_AGENTS_ENABLED",
+            bool_env(settings.compat_cursor_agents),
+        ),
+        (
+            "GROK_CURSOR_RULES_ENABLED",
+            bool_env(settings.compat_cursor_rules),
+        ),
+        (
+            "GROK_CURSOR_HOOKS_ENABLED",
+            bool_env(settings.compat_cursor_hooks),
+        ),
+        (
+            "GROK_CURSOR_SESSIONS_ENABLED",
+            bool_env(settings.compat_cursor_sessions),
+        ),
+        (
+            "GROK_CODEX_SESSIONS_ENABLED",
+            bool_env(settings.compat_codex_sessions),
+        ),
+    ]
 }
 
-/// Write `[compat.claude/cursor] mcps = false` into independent agent-home.
-pub fn apply_compat_mcp_disabled(session_data_mode: &str) -> Result<(), String> {
-    update_config_toml_if_independent(session_data_mode, ensure_compat_mcp_disabled).map(|_| ())
+/// Apply supported compatibility overrides to a standard-library child command.
+pub fn apply_compatibility_to_std_command(
+    cmd: &mut std::process::Command,
+    settings: &crate::store::AppSettings,
+) {
+    for (key, value) in compatibility_env_pairs(settings) {
+        cmd.env(key, value);
+    }
+}
+
+/// Apply supported compatibility overrides to a Tokio child command.
+pub fn apply_compatibility_to_tokio_command(
+    cmd: &mut tokio::process::Command,
+    settings: &crate::store::AppSettings,
+) {
+    for (key, value) in compatibility_env_pairs(settings) {
+        cmd.env(key, value);
+    }
+}
+
+/// Apply all GUI compatibility choices to App-owned agent-home config.toml.
+///
+/// Shared mode is intentionally a no-op: the App must not rewrite the user's
+/// `~/.grok/config.toml`. Process-local compatibility environment variables
+/// keep the supported GUI choices effective for every spawned CLI process.
+pub fn sync_compatibility_to_agent_profile(
+    session_data_mode: &str,
+    settings: &crate::store::AppSettings,
+) -> Result<(), String> {
+    update_config_toml_if_independent(session_data_mode, |text| {
+        let mut next = text.to_string();
+        for (table, key, value) in [
+            ("compat.claude", "skills", settings.compat_claude_skills),
+            ("compat.claude", "mcps", settings.compat_claude_mcps),
+            ("compat.claude", "agents", settings.compat_claude_agents),
+            ("compat.claude", "rules", settings.compat_claude_rules),
+            ("compat.claude", "hooks", settings.compat_claude_hooks),
+            ("compat.claude", "sessions", settings.compat_claude_sessions),
+            ("compat.cursor", "skills", settings.compat_cursor_skills),
+            ("compat.cursor", "mcps", settings.compat_cursor_mcps),
+            ("compat.cursor", "agents", settings.compat_cursor_agents),
+            ("compat.cursor", "rules", settings.compat_cursor_rules),
+            ("compat.cursor", "hooks", settings.compat_cursor_hooks),
+            ("compat.cursor", "sessions", settings.compat_cursor_sessions),
+            ("compat.codex", "skills", settings.compat_codex_skills),
+            ("compat.codex", "mcps", settings.compat_codex_mcps),
+            ("compat.codex", "agents", settings.compat_codex_agents),
+            ("compat.codex", "rules", settings.compat_codex_rules),
+            ("compat.codex", "hooks", settings.compat_codex_hooks),
+            ("compat.codex", "sessions", settings.compat_codex_sessions),
+        ] {
+            next = set_table_bool(&next, table, key, value);
+        }
+        next
+    })
+    .map(|_| ())
 }
 
 /// Upsert `[table] key = "value"`.
@@ -348,12 +463,42 @@ mod tests {
     }
 
     #[test]
-    fn ensure_compat_mcp_disabled_sets_both() {
-        let t = ensure_compat_mcp_disabled("");
-        assert_eq!(get_table_bool(&t, "compat.claude", "mcps"), Some(false));
-        assert_eq!(get_table_bool(&t, "compat.cursor", "mcps"), Some(false));
-        let again = ensure_compat_mcp_disabled(&t);
-        assert_eq!(get_table_bool(&again, "compat.claude", "mcps"), Some(false));
+    fn compatibility_env_pairs_cover_supported_cli_surfaces() {
+        let settings = crate::store::AppSettings::default();
+        let pairs = compatibility_env_pairs(&settings);
+        assert_eq!(pairs.len(), 13);
+        assert!(pairs.contains(&("GROK_CLAUDE_SKILLS_ENABLED", "false")));
+        assert!(pairs.contains(&("GROK_CURSOR_MCPS_ENABLED", "true")));
+        assert!(pairs.contains(&("GROK_CODEX_SESSIONS_ENABLED", "true")));
+        assert!(!pairs
+            .iter()
+            .any(|(key, _)| *key == "GROK_CODEX_SKILLS_ENABLED"));
+    }
+
+    #[test]
+    fn compatibility_sync_writes_every_surface_in_independent_mode() {
+        let _guard = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = temp_app_home("compatibility");
+        std::env::set_var("GROK_APP_HOME", &home);
+
+        let settings = crate::store::AppSettings::default();
+        sync_compatibility_to_agent_profile("independent", &settings).unwrap();
+        let disk = fs::read_to_string(crate::paths::agent_config_toml()).unwrap();
+        assert_eq!(
+            get_table_bool(&disk, "compat.claude", "skills"),
+            Some(false)
+        );
+        assert_eq!(get_table_bool(&disk, "compat.cursor", "mcps"), Some(true));
+        assert_eq!(
+            get_table_bool(&disk, "compat.codex", "sessions"),
+            Some(true)
+        );
+        assert_eq!(get_table_bool(&disk, "compat.codex", "skills"), Some(false));
+
+        std::env::remove_var("GROK_APP_HOME");
+        let _ = fs::remove_dir_all(&home);
     }
 
     fn set_and_get_table_bool_and_string() {

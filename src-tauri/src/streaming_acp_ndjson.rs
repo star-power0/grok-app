@@ -109,11 +109,12 @@ fn resolve_binary(manual_path: Option<&str>) -> Option<PathBuf> {
 }
 
 fn apply_agent_env(cmd: &mut Command) {
-    let mode = crate::store::load_settings().session_data_mode;
-    let grok_home = crate::paths::resolve_agent_grok_home(&mode);
+    let settings = crate::store::load_settings();
+    let grok_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
     let _ = std::fs::create_dir_all(&grok_home);
     cmd.env("GROK_HOME", &grok_home);
-    if mode != "shared" {
+    crate::agent_home_config::apply_compatibility_to_std_command(cmd, &settings);
+    if settings.session_data_mode != "shared" {
         crate::providers::prepare_route_auth_for_agent();
     }
     if let Some(path_env) = crate::process_util::enriched_path_env() {

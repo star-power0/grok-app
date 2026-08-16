@@ -453,8 +453,8 @@ pub struct AppSettings {
     pub audit_ledger_retention_days: u32,
     /// Compatibility flags for loading resources from other IDEs/editors.
     /// When a flag is true, Grok scans `~/.{ide}/` directories for skills,
-    /// MCP configs, agents, rules, hooks, and sessions. Default all true
-    /// for Claude, all true for Cursor, sessions-only for Codex.
+    /// MCP configs, agents, rules, hooks, and sessions. Claude is opt-in,
+    /// Cursor defaults on, and Codex currently supports sessions only.
     #[serde(default)]
     pub compat_claude_skills: bool,
     #[serde(default)]
@@ -467,17 +467,17 @@ pub struct AppSettings {
     pub compat_claude_hooks: bool,
     #[serde(default)]
     pub compat_claude_sessions: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_skills: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_mcps: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_agents: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_rules: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_hooks: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_cursor_sessions: bool,
     #[serde(default)]
     pub compat_codex_skills: bool,
@@ -489,8 +489,29 @@ pub struct AppSettings {
     pub compat_codex_rules: bool,
     #[serde(default)]
     pub compat_codex_hooks: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub compat_codex_sessions: bool,
+}
+
+pub fn compatibility_changed(prev: &AppSettings, next: &AppSettings) -> bool {
+    prev.compat_claude_skills != next.compat_claude_skills
+        || prev.compat_claude_mcps != next.compat_claude_mcps
+        || prev.compat_claude_agents != next.compat_claude_agents
+        || prev.compat_claude_rules != next.compat_claude_rules
+        || prev.compat_claude_hooks != next.compat_claude_hooks
+        || prev.compat_claude_sessions != next.compat_claude_sessions
+        || prev.compat_cursor_skills != next.compat_cursor_skills
+        || prev.compat_cursor_mcps != next.compat_cursor_mcps
+        || prev.compat_cursor_agents != next.compat_cursor_agents
+        || prev.compat_cursor_rules != next.compat_cursor_rules
+        || prev.compat_cursor_hooks != next.compat_cursor_hooks
+        || prev.compat_cursor_sessions != next.compat_cursor_sessions
+        || prev.compat_codex_skills != next.compat_codex_skills
+        || prev.compat_codex_mcps != next.compat_codex_mcps
+        || prev.compat_codex_agents != next.compat_codex_agents
+        || prev.compat_codex_rules != next.compat_codex_rules
+        || prev.compat_codex_hooks != next.compat_codex_hooks
+        || prev.compat_codex_sessions != next.compat_codex_sessions
 }
 
 fn default_composer_prefs_scope() -> String {
@@ -629,13 +650,13 @@ impl Default for AppSettings {
             allow_unverified_cli_install: false,
             last_cli_checksum_verified: None,
             audit_ledger_retention_days: 0,
-            // Default compat flags: Claude/Cursor all enabled, Codex sessions-only.
-            compat_claude_skills: true,
-            compat_claude_mcps: true,
-            compat_claude_agents: true,
-            compat_claude_rules: true,
-            compat_claude_hooks: true,
-            compat_claude_sessions: true,
+            // Default compat flags: Claude opt-in, Cursor enabled, Codex sessions-only.
+            compat_claude_skills: false,
+            compat_claude_mcps: false,
+            compat_claude_agents: false,
+            compat_claude_rules: false,
+            compat_claude_hooks: false,
+            compat_claude_sessions: false,
             compat_cursor_skills: true,
             compat_cursor_mcps: true,
             compat_cursor_agents: true,

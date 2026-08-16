@@ -915,6 +915,7 @@ pub fn run_aux_headless(
         .arg("--output-format")
         .arg("plain");
     cmd.env("GROK_HOME", &grok_home);
+    crate::agent_home_config::apply_compatibility_to_std_command(&mut cmd, &settings);
     crate::process_util::apply_no_window_std(&mut cmd);
     if let Some(path_env) = crate::process_util::enriched_path_env() {
         cmd.env("PATH", path_env);

@@ -28,8 +28,14 @@
     box-shadow 120ms ease;
 }
 
-.ui-check:hover .ui-check__box {
+.ui-check:hover:not(:disabled) .ui-check__box {
   border-color: color-mix(in srgb, var(--accent, #6b9fff) 45%, var(--border-strong, #666));
+}
+
+.ui-check.is-disabled,
+.settings-row.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .ui-check.is-on .ui-check__box,

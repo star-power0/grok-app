@@ -38,13 +38,57 @@ need_cmd cargo
 
 OS="$(uname -s)"
 
+# Tauri must compile the release binary with its production custom protocol.
+# Without this explicit feature, a stale/mixed target directory can leave the
+# executable using build.devUrl (localhost:1421) instead of embedding dist/.
+TAURI_RELEASE_FEATURES="tauri/custom-protocol"
+
+build_tauri_release() {
+  local target_args=("$@")
+  echo "Using Tauri release features: ${TAURI_RELEASE_FEATURES}"
+  # Frontend is built via beforeBuildCommand in tauri.conf.json.
+  pnpm exec tauri build --features "$TAURI_RELEASE_FEATURES" "${target_args[@]}"
+}
+
+assert_windows_release_artifact() {
+  local triple="$1"
+  local artifact_dir="src-tauri/target/${triple}/release"
+  local exe=""
+
+  for candidate in Grok.exe grok-app.exe; do
+    if [[ -f "${artifact_dir}/${candidate}" ]]; then
+      exe="${artifact_dir}/${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "$exe" ]]; then
+    echo "error: release executable not found under ${artifact_dir}" >&2
+    find "src-tauri/target/${triple}" -maxdepth 5 -type f -name '*.exe' -print 2>/dev/null || true
+    exit 1
+  fi
+
+  if [[ ! -f dist/index.html ]]; then
+    echo "error: frontend dist/index.html is missing; refusing release artifact" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "${artifact_dir}/bundle/nsis" ]]; then
+    echo "error: NSIS bundle directory is missing under ${artifact_dir}/bundle" >&2
+    exit 1
+  fi
+
+  echo "Verified release executable: ${exe}"
+  echo "Verified frontend: dist/index.html"
+  echo "Verified NSIS bundle: ${artifact_dir}/bundle/nsis"
+}
+
 build_target() {
   local triple="$1"
   echo ""
   echo "======== Building target: $triple ========"
   rustup target add "$triple" >/dev/null 2>&1 || true
-  # Frontend is built via beforeBuildCommand in tauri.conf.json
-  pnpm exec tauri build --target "$triple"
+  build_tauri_release --target "$triple"
   echo "Artifacts under: src-tauri/target/${triple}/release/bundle/"
 }
 
@@ -69,12 +113,12 @@ build_windows() {
       echo "warn: clang-cl not on PATH — install brew llvm and ensure PATH includes it" >&2
       echo "      brew install llvm && export PATH=\"\$(brew --prefix llvm)/bin:\$PATH\"" >&2
     fi
-    echo "Using runner: cargo-xwin (cross-compile from $OS)"
     # Official Tauri path: https://v2.tauri.app/distribute/windows-installer/
-    pnpm exec tauri build --runner cargo-xwin --target "$triple"
+    echo "Using runner: cargo-xwin (cross-compile from $OS)"
+    pnpm exec tauri build --runner cargo-xwin --features "$TAURI_RELEASE_FEATURES" --target "$triple"
   else
     echo "Using native Windows MSVC toolchain"
-    pnpm exec tauri build --target "$triple"
+    build_tauri_release --target "$triple"
   fi
 
   echo "Artifacts under: src-tauri/target/${triple}/release/bundle/"
@@ -83,12 +127,13 @@ build_windows() {
     echo "NSIS installers:"
     ls -lah "$nsis" || true
   fi
+  assert_windows_release_artifact "$triple"
 }
 
 case "$TARGET_ALIAS" in
   host|"")
     echo "======== Building host default ========"
-    pnpm exec tauri build
+    build_tauri_release
     echo "Artifacts under: src-tauri/target/release/bundle/"
     ;;
   mac-arm|aarch64-apple-darwin)

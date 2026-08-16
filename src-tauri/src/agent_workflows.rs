@@ -663,6 +663,7 @@ pub fn run_workflow(
         let grok_home = crate::paths::resolve_agent_grok_home(&mode_home);
         let _ = std::fs::create_dir_all(&grok_home);
         cmd.env("GROK_HOME", &grok_home);
+        crate::agent_home_config::apply_compatibility_to_std_command(&mut cmd, &settings);
         if mode_home != "shared" {
             crate::providers::prepare_route_auth_for_agent();
         }

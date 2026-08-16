@@ -495,6 +495,8 @@ export const zhSettingsUi = {
   "settings.tab.compatibility": "兼容性",
   "settings.section.compatibility": "第三方 IDE 兼容性",
   "settings.compatibility.desc": "控制 Grok 是否扫描其他 IDE/编辑器的配置目录（技能、MCP 服务器、Agent、规则、钩子、会话）。关闭不需要的选项可加快启动速度。",
+  "settings.compatibility.master": "启用第三方 IDE 兼容性",
+  "settings.compatibility.master.desc": "关闭后进入纯 Grok 模式；开启后会启用 Grok Build 当前实际支持的全部兼容来源。",
   "settings.compatibility.skills": "技能 (Skills)",
   "settings.compatibility.skills.desc": "扫描该 IDE 技能目录中的 SKILL.md 文件。",
   "settings.compatibility.mcps": "MCP 服务器",
@@ -506,5 +508,6 @@ export const zhSettingsUi = {
   "settings.compatibility.hooks": "钩子 (Hooks)",
   "settings.compatibility.hooks.desc": "从该 IDE 的钩子目录加载生命周期钩子。",
   "settings.compatibility.sessions": "会话历史",
-  "settings.compatibility.sessions.desc": "从该 IDE 的会话历史中导入历史记录。",
+  "settings.compatibility.sessions.desc": "启用 CLI 的分阶段厂商会话兼容项；对应扫描器可用后才会执行导入发现。",
+  "settings.compatibility.reserved.desc": "保留项：Grok Build 尚未使用此 Codex 资源类型。",
 };

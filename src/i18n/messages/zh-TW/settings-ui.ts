@@ -495,6 +495,8 @@ export const zhTWSettingsUi = {
   "settings.tab.compatibility": "相容性",
   "settings.section.compatibility": "第三方 IDE 相容性",
   "settings.compatibility.desc": "控制 Grok 是否掃描其他 IDE/編輯器的設定目錄（技能、MCP 伺服器、Agent、規則、鉤子、工作階段）。關閉不需要的選項可加快啟動速度。",
+  "settings.compatibility.master": "啟用第三方 IDE 相容性",
+  "settings.compatibility.master.desc": "關閉後進入純 Grok 模式；開啟後會啟用 Grok Build 目前實際支援的全部相容來源。",
   "settings.compatibility.skills": "技能 (Skills)",
   "settings.compatibility.skills.desc": "掃描該 IDE 技能目錄中的 SKILL.md 檔案。",
   "settings.compatibility.mcps": "MCP 伺服器",
@@ -506,5 +508,6 @@ export const zhTWSettingsUi = {
   "settings.compatibility.hooks": "鉤子 (Hooks)",
   "settings.compatibility.hooks.desc": "從該 IDE 的鉤子目錄載入生命週期鉤子。",
   "settings.compatibility.sessions": "工作階段歷史",
-  "settings.compatibility.sessions.desc": "從該 IDE 的工作階段歷史中匯入歷史記錄。",
+  "settings.compatibility.sessions.desc": "啟用 CLI 的分階段廠商工作階段相容項；對應掃描器可用後才會執行匯入探索。",
+  "settings.compatibility.reserved.desc": "保留項：Grok Build 尚未使用此 Codex 資源類型。",
 };

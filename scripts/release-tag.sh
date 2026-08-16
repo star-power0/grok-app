@@ -4,10 +4,9 @@
 #   ./scripts/release-tag.sh 0.1.1
 #   ./scripts/release-tag.sh 0.1.1 --push
 #
-# Does NOT push by default. CI (.github/workflows/release.yml) runs on tag push v*.
+# Does NOT push by default. This repository has no release workflow; after
+# pushing a tag, publish the GitHub Release explicitly with `gh release create`.
 #
-# Release notes (GitHub Release body) are generated from CHANGELOG.md by CI:
-#   scripts/changelog-for-release.py → releaseBody for tauri-action
 # Before tagging, ensure CHANGELOG has a section:
 #   ## [X.Y.Z] - YYYY-MM-DD
 # with bilingual (EN + 中文) notes under Added/Fixed/Changed as needed.
@@ -75,12 +74,22 @@ from pathlib import Path
 
 ver = os.environ["VER"]
 
-# package.json
+# package.json + npm lock root metadata
 p = Path("package.json")
 data = json.loads(p.read_text())
 data["version"] = ver
 p.write_text(json.dumps(data, indent=2) + "\n")
 print("package.json ->", ver)
+
+p = Path("package-lock.json")
+if p.is_file():
+    lock = json.loads(p.read_text())
+    lock["version"] = ver
+    root = lock.get("packages", {}).get("")
+    if isinstance(root, dict):
+        root["version"] = ver
+    p.write_text(json.dumps(lock, indent=2) + "\n")
+    print("package-lock.json ->", ver)
 
 # tauri.conf.json
 p = Path("src-tauri/tauri.conf.json")

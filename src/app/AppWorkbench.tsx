@@ -990,6 +990,90 @@ import { useStreamPerfMode } from "@/hooks/useStreamPerfMode";
 /** App-local plan chrome state (session-scoped via planBySessionRef). */
 type PlanState = SessionPlanState;
 
+const COMPATIBILITY_KEYS = [
+  "compatClaudeSkills",
+  "compatClaudeMcps",
+  "compatClaudeAgents",
+  "compatClaudeRules",
+  "compatClaudeHooks",
+  "compatClaudeSessions",
+  "compatCursorSkills",
+  "compatCursorMcps",
+  "compatCursorAgents",
+  "compatCursorRules",
+  "compatCursorHooks",
+  "compatCursorSessions",
+  "compatCodexSkills",
+  "compatCodexMcps",
+  "compatCodexAgents",
+  "compatCodexRules",
+  "compatCodexHooks",
+  "compatCodexSessions",
+] as const;
+
+type CompatibilityKey = (typeof COMPATIBILITY_KEYS)[number];
+type CompatibilitySettings = { [K in CompatibilityKey]: boolean };
+
+const MASTER_COMPATIBILITY_KEYS: readonly CompatibilityKey[] = [
+  "compatClaudeSkills",
+  "compatClaudeMcps",
+  "compatClaudeAgents",
+  "compatClaudeRules",
+  "compatClaudeHooks",
+  "compatClaudeSessions",
+  "compatCursorSkills",
+  "compatCursorMcps",
+  "compatCursorAgents",
+  "compatCursorRules",
+  "compatCursorHooks",
+  "compatCursorSessions",
+  "compatCodexSessions",
+];
+
+const DEFAULT_COMPATIBILITY: CompatibilitySettings = {
+  compatClaudeSkills: false,
+  compatClaudeMcps: false,
+  compatClaudeAgents: false,
+  compatClaudeRules: false,
+  compatClaudeHooks: false,
+  compatClaudeSessions: false,
+  compatCursorSkills: true,
+  compatCursorMcps: true,
+  compatCursorAgents: true,
+  compatCursorRules: true,
+  compatCursorHooks: true,
+  compatCursorSessions: true,
+  compatCodexSkills: false,
+  compatCodexMcps: false,
+  compatCodexAgents: false,
+  compatCodexRules: false,
+  compatCodexHooks: false,
+  compatCodexSessions: true,
+};
+
+function compatibilityFromSettings(settings: api.AppSettings): CompatibilitySettings {
+  return {
+    compatClaudeSkills: settings.compatClaudeSkills ?? DEFAULT_COMPATIBILITY.compatClaudeSkills,
+    compatClaudeMcps: settings.compatClaudeMcps ?? DEFAULT_COMPATIBILITY.compatClaudeMcps,
+    compatClaudeAgents: settings.compatClaudeAgents ?? DEFAULT_COMPATIBILITY.compatClaudeAgents,
+    compatClaudeRules: settings.compatClaudeRules ?? DEFAULT_COMPATIBILITY.compatClaudeRules,
+    compatClaudeHooks: settings.compatClaudeHooks ?? DEFAULT_COMPATIBILITY.compatClaudeHooks,
+    compatClaudeSessions: settings.compatClaudeSessions ?? DEFAULT_COMPATIBILITY.compatClaudeSessions,
+    compatCursorSkills: settings.compatCursorSkills ?? DEFAULT_COMPATIBILITY.compatCursorSkills,
+    compatCursorMcps: settings.compatCursorMcps ?? DEFAULT_COMPATIBILITY.compatCursorMcps,
+    compatCursorAgents: settings.compatCursorAgents ?? DEFAULT_COMPATIBILITY.compatCursorAgents,
+    compatCursorRules: settings.compatCursorRules ?? DEFAULT_COMPATIBILITY.compatCursorRules,
+    compatCursorHooks: settings.compatCursorHooks ?? DEFAULT_COMPATIBILITY.compatCursorHooks,
+    compatCursorSessions: settings.compatCursorSessions ?? DEFAULT_COMPATIBILITY.compatCursorSessions,
+    compatCodexSkills: settings.compatCodexSkills ?? DEFAULT_COMPATIBILITY.compatCodexSkills,
+    compatCodexMcps: settings.compatCodexMcps ?? DEFAULT_COMPATIBILITY.compatCodexMcps,
+    compatCodexAgents: settings.compatCodexAgents ?? DEFAULT_COMPATIBILITY.compatCodexAgents,
+    compatCodexRules: settings.compatCodexRules ?? DEFAULT_COMPATIBILITY.compatCodexRules,
+    compatCodexHooks: settings.compatCodexHooks ?? DEFAULT_COMPATIBILITY.compatCodexHooks,
+    compatCodexSessions: settings.compatCodexSessions ?? DEFAULT_COMPATIBILITY.compatCodexSessions,
+  };
+}
+
 
 export function AppWorkbench() {
   const {
@@ -1525,6 +1609,15 @@ export function AppWorkbench() {
   /** Set by newChat; applied after chat pane + textarea mount. */
   const pendingComposerFocus = useRef(false);
   const [sessionDataMode, setSessionDataMode] = useState("independent");
+  const [compatibility, setCompatibility] = useState<CompatibilitySettings>(
+    DEFAULT_COMPATIBILITY,
+  );
+  const compatibilityRef = useRef(compatibility);
+  compatibilityRef.current = compatibility;
+  const compatibilitySaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const compatibilityBeforeDisabledRef = useRef<CompatibilitySettings>(
+    DEFAULT_COMPATIBILITY,
+  );
   const [defaultOpenTarget, setDefaultOpenTarget] = useState("finder");
   const [showUserMenu, setShowUserMenu] = useState(false);
   /** Desktop Connect panel (AC7) — close does not stop host. */
@@ -2798,6 +2891,9 @@ export function AppWorkbench() {
             setPrefsScope(settings.composerPrefsScope);
           }
           setSessionDataMode(settings.sessionDataMode || "independent");
+          const nextCompatibility = compatibilityFromSettings(settings);
+          compatibilityBeforeDisabledRef.current = nextCompatibility;
+          setCompatibility(nextCompatibility);
         }
         const catalog: ModelOption[] =
           modelsRes?.models?.length
@@ -2949,6 +3045,9 @@ export function AppWorkbench() {
         );
       }
       setSessionDataMode(settings.sessionDataMode || "independent");
+      const nextCompatibility = compatibilityFromSettings(settings);
+      compatibilityBeforeDisabledRef.current = nextCompatibility;
+      setCompatibility(nextCompatibility);
       setDefaultOpenTarget(
         (settings as { defaultOpenTarget?: string }).defaultOpenTarget ||
           "finder",
@@ -8688,6 +8787,150 @@ export function AppWorkbench() {
     }, ms);
   }, []);
 
+  /**
+   * Stable label bag for the composer access menu.
+   *
+   * Rebuilding this object inline made the memo boundary on
+   * `ComposerAccessMenu` useless: any AppWorkbench state change produced a new
+   * `labels` identity and re-rendered (and re-measured) the open panel.
+   * `tr` only changes with locale, so this recomputes just on language switch.
+   */
+  const composerAccessLabels = useMemo(
+    () => ({
+      access: tr("composer.access"),
+      accessHint: tr("composer.accessHint"),
+      mode: tr("composer.mode"),
+      modeAgent: tr("mode.agent"),
+      modePlan: tr("mode.plan"),
+      modeAsk: tr("mode.ask"),
+      modeAgentDesc: tr("mode.agentDesc"),
+      modePlanDesc: tr("mode.planDesc"),
+      modeAskDesc: tr("mode.askDesc"),
+      permission: tr("composer.permission"),
+      policyAsk: tr("policy.ask"),
+      policyAcceptEdits: tr("policy.accept_edits"),
+      policySession: tr("policy.allow_for_session"),
+      policyAuto: tr("policy.auto"),
+      policyDontAsk: tr("policy.dont_ask"),
+      policyYolo: tr("policy.always_approve"),
+      policyAskDesc: tr("policy.askDesc"),
+      policyAcceptEditsDesc: tr("policy.accept_editsDesc"),
+      policySessionDesc: tr("policy.allow_for_sessionDesc"),
+      policyAutoDesc: tr("policy.autoDesc"),
+      policyDontAskDesc: tr("policy.dont_askDesc"),
+      policyYoloDesc: tr("policy.always_approveDesc"),
+      policyShortAsk: tr("policy.short.ask"),
+      policyShortAccept: tr("policy.short.accept_edits"),
+      policyShortSession: tr("policy.short.allow_for_session"),
+      policyShortAuto: tr("policy.short.auto"),
+      policyShortDontAsk: tr("policy.short.dont_ask"),
+      policyShortYolo: tr("policy.short.always_approve"),
+    }),
+    [tr],
+  );
+
+  const composerPrefsProjectId = activeProject?.id ?? null;
+  const composerPrefsSessionId = session.sessionId ?? null;
+
+  /** Locale-stable label bag for the model menu (same rationale as access). */
+  const composerModelLabels = useMemo(
+    () => ({
+      model: tr("composer.model"),
+      modelGroupOfficial: tr("composer.modelGroupOfficial"),
+      modelViaProvider: tr("composer.modelViaProvider"),
+      effort: tr("composer.effort"),
+      effortHigh: tr("effort.high"),
+      effortMedium: tr("effort.medium"),
+      effortLow: tr("effort.low"),
+      effortXhigh: tr("effort.xhigh"),
+      effortMax: tr("effort.max"),
+      modelSearchPlaceholder: tr("composer.modelSearchPlaceholder"),
+      modelSearchEmpty: tr("composer.modelSearchEmpty"),
+    }),
+    [tr],
+  );
+
+  const handleComposerModeChange = useCallback(
+    (v: string) => {
+      setMode(v);
+      if (v === "plan") setGoalMode(false);
+      void api
+        .composerPrefsSet({
+          projectId: composerPrefsProjectId,
+          sessionId: composerPrefsSessionId,
+          mode: v,
+        })
+        .catch((e) => showToast(String(e), 4000));
+    },
+    [composerPrefsProjectId, composerPrefsSessionId, showToast],
+  );
+
+  const saveCompatibility = useCallback(
+    (next: CompatibilitySettings) => {
+      compatibilityRef.current = next;
+      setCompatibility(next);
+      compatibilitySaveQueueRef.current = compatibilitySaveQueueRef.current
+        .catch(() => {})
+        .then(async () => {
+          const saved = await api.settingsPatchCompatibility(next);
+          const normalized = compatibilityFromSettings(saved);
+          compatibilityRef.current = normalized;
+          setCompatibility(normalized);
+        })
+        .catch((error) => {
+          void api
+            .settingsGet()
+            .then((settings) => {
+              const restored = compatibilityFromSettings(settings);
+              compatibilityRef.current = restored;
+              setCompatibility(restored);
+            })
+            .catch(() => {});
+          showToast(`Compatibility settings were not saved: ${String(error)}`, 4800);
+        });
+    },
+    [showToast],
+  );
+
+  const setCompatibilityValue = useCallback(
+    (key: CompatibilityKey, value: boolean) => {
+      saveCompatibility({ ...compatibilityRef.current, [key]: value });
+    },
+    [saveCompatibility],
+  );
+
+  const setCompatibilityEnabled = useCallback(
+    (enabled: boolean) => {
+      const current = compatibilityRef.current;
+      if (!enabled) {
+        if (MASTER_COMPATIBILITY_KEYS.some((key) => current[key])) {
+          compatibilityBeforeDisabledRef.current = current;
+        }
+        saveCompatibility({
+          ...current,
+          ...Object.fromEntries(
+            MASTER_COMPATIBILITY_KEYS.map((key) => [key, false]),
+          ),
+        } as CompatibilitySettings);
+        return;
+      }
+
+      const allDisabled = MASTER_COMPATIBILITY_KEYS.every((key) => !current[key]);
+      const previous = compatibilityBeforeDisabledRef.current;
+      const next =
+        allDisabled && MASTER_COMPATIBILITY_KEYS.some((key) => previous[key])
+          ? previous
+          : ({
+              ...current,
+              ...Object.fromEntries(
+                MASTER_COMPATIBILITY_KEYS.map((key) => [key, true]),
+              ),
+            } as CompatibilitySettings);
+      saveCompatibility(next);
+    },
+    [saveCompatibility],
+  );
+
   const applyWallpaperChoice = (
     record: Parameters<typeof applyWallpaperChoiceBase>[0],
   ) =>
@@ -10989,6 +11232,38 @@ export function AppWorkbench() {
       channelEffortOptions,
     ],
   );
+  const handleComposerModelPick = useCallback(
+    (pick: ComposerModelPick) => {
+      void handleModelPick(pick);
+    },
+    [handleModelPick],
+  );
+
+  const handleComposerEffortChange = useCallback(
+    (v: string) => {
+      if (!isValidEffort(v, channelEffortOptions ?? undefined)) return;
+      setEffort(v);
+      void api
+        .composerPrefsSet({
+          projectId: composerPrefsProjectId,
+          sessionId: composerPrefsSessionId,
+          effort: v,
+        })
+        .catch((e) => showToast(String(e), 4000));
+    },
+    [
+      channelEffortOptions,
+      composerPrefsProjectId,
+      composerPrefsSessionId,
+      showToast,
+    ],
+  );
+
+  const composerModelApplyNotes = useMemo(
+    () => ({ model: modelApplyNote }),
+    [modelApplyNote],
+  );
+
   const liveBrandKind = useMemo(
     () =>
       superGrokBrandKind(
@@ -16269,6 +16544,48 @@ export function AppWorkbench() {
           trustedProjects={projects
           .filter((p) => p.trusted)
           .map((p) => ({ id: p.id, name: p.name, path: p.path }))}
+          compatibilityEnabled={MASTER_COMPATIBILITY_KEYS.every((key) => compatibility[key])}
+          compatibilityIndeterminate={
+            MASTER_COMPATIBILITY_KEYS.some((key) => compatibility[key]) &&
+            !MASTER_COMPATIBILITY_KEYS.every((key) => compatibility[key])
+          }
+          onCompatibilityEnabled={setCompatibilityEnabled}
+          compatClaudeSkills={compatibility.compatClaudeSkills}
+          compatClaudeMcps={compatibility.compatClaudeMcps}
+          compatClaudeAgents={compatibility.compatClaudeAgents}
+          compatClaudeRules={compatibility.compatClaudeRules}
+          compatClaudeHooks={compatibility.compatClaudeHooks}
+          compatClaudeSessions={compatibility.compatClaudeSessions}
+          compatCursorSkills={compatibility.compatCursorSkills}
+          compatCursorMcps={compatibility.compatCursorMcps}
+          compatCursorAgents={compatibility.compatCursorAgents}
+          compatCursorRules={compatibility.compatCursorRules}
+          compatCursorHooks={compatibility.compatCursorHooks}
+          compatCursorSessions={compatibility.compatCursorSessions}
+          compatCodexSkills={compatibility.compatCodexSkills}
+          compatCodexMcps={compatibility.compatCodexMcps}
+          compatCodexAgents={compatibility.compatCodexAgents}
+          compatCodexRules={compatibility.compatCodexRules}
+          compatCodexHooks={compatibility.compatCodexHooks}
+          compatCodexSessions={compatibility.compatCodexSessions}
+          onCompatClaudeSkills={(v) => setCompatibilityValue("compatClaudeSkills", v)}
+          onCompatClaudeMcps={(v) => setCompatibilityValue("compatClaudeMcps", v)}
+          onCompatClaudeAgents={(v) => setCompatibilityValue("compatClaudeAgents", v)}
+          onCompatClaudeRules={(v) => setCompatibilityValue("compatClaudeRules", v)}
+          onCompatClaudeHooks={(v) => setCompatibilityValue("compatClaudeHooks", v)}
+          onCompatClaudeSessions={(v) => setCompatibilityValue("compatClaudeSessions", v)}
+          onCompatCursorSkills={(v) => setCompatibilityValue("compatCursorSkills", v)}
+          onCompatCursorMcps={(v) => setCompatibilityValue("compatCursorMcps", v)}
+          onCompatCursorAgents={(v) => setCompatibilityValue("compatCursorAgents", v)}
+          onCompatCursorRules={(v) => setCompatibilityValue("compatCursorRules", v)}
+          onCompatCursorHooks={(v) => setCompatibilityValue("compatCursorHooks", v)}
+          onCompatCursorSessions={(v) => setCompatibilityValue("compatCursorSessions", v)}
+          onCompatCodexSkills={(v) => setCompatibilityValue("compatCodexSkills", v)}
+          onCompatCodexMcps={(v) => setCompatibilityValue("compatCodexMcps", v)}
+          onCompatCodexAgents={(v) => setCompatibilityValue("compatCodexAgents", v)}
+          onCompatCodexRules={(v) => setCompatibilityValue("compatCodexRules", v)}
+          onCompatCodexHooks={(v) => setCompatibilityValue("compatCodexHooks", v)}
+          onCompatCodexSessions={(v) => setCompatibilityValue("compatCodexSessions", v)}
           onProvidersChanged={() => {
           // CRUD on provider list / models / efforts — keep composer menu in sync.
           void refreshProviderRoute();
@@ -18753,94 +19070,17 @@ export function AppWorkbench() {
                       activeSource={providerActiveSource}
                       activeProviderId={providerActiveId}
                       channelEfforts={channelEffortOptions}
-                      labels={{
-                        model: tr("composer.model"),
-                        modelGroupOfficial: tr("composer.modelGroupOfficial"),
-                        modelViaProvider: tr("composer.modelViaProvider"),
-                        effort: tr("composer.effort"),
-                        effortHigh: tr("effort.high"),
-                        effortMedium: tr("effort.medium"),
-                        effortLow: tr("effort.low"),
-                        effortXhigh: tr("effort.xhigh"),
-                        effortMax: tr("effort.max"),
-                        modelSearchPlaceholder: tr(
-                          "composer.modelSearchPlaceholder",
-                        ),
-                        modelSearchEmpty: tr("composer.modelSearchEmpty"),
-                      }}
-                      applyNotes={{ model: modelApplyNote }}
-                      onModelPick={(pick) => {
-                        void handleModelPick(pick);
-                      }}
-                      onEffort={(v) => {
-                        if (
-                          !isValidEffort(
-                            v,
-                            channelEffortOptions ?? undefined,
-                          )
-                        )
-                          return;
-                        setEffort(v);
-                        void api
-                          .composerPrefsSet({
-                            projectId: activeProject?.id ?? null,
-                            sessionId: session.sessionId ?? null,
-                            effort: v,
-                          })
-                          .catch((e) => showToast(String(e), 4000));
-                      }}
+                      labels={composerModelLabels}
+                      applyNotes={composerModelApplyNotes}
+                      onModelPick={handleComposerModelPick}
+                      onEffort={handleComposerEffortChange}
                     />
                     <ComposerAccessMenu
                       mode={mode}
                       policy={policy}
-                      labels={{
-                        access: tr("composer.access"),
-                        accessHint: tr("composer.accessHint"),
-                        mode: tr("composer.mode"),
-                        modeAgent: tr("mode.agent"),
-                        modePlan: tr("mode.plan"),
-                        modeAsk: tr("mode.ask"),
-                        modeAgentDesc: tr("mode.agentDesc"),
-                        modePlanDesc: tr("mode.planDesc"),
-                        modeAskDesc: tr("mode.askDesc"),
-                        permission: tr("composer.permission"),
-                        policyAsk: tr("policy.ask"),
-                        policyAcceptEdits: tr("policy.accept_edits"),
-                        policySession: tr("policy.allow_for_session"),
-                        policyAuto: tr("policy.auto"),
-                        policyDontAsk: tr("policy.dont_ask"),
-                        policyYolo: tr("policy.always_approve"),
-                        policyAskDesc: tr("policy.askDesc"),
-                        policyAcceptEditsDesc: tr("policy.accept_editsDesc"),
-                        policySessionDesc: tr(
-                          "policy.allow_for_sessionDesc",
-                        ),
-                        policyAutoDesc: tr("policy.autoDesc"),
-                        policyDontAskDesc: tr("policy.dont_askDesc"),
-                        policyYoloDesc: tr("policy.always_approveDesc"),
-                        policyShortAsk: tr("policy.short.ask"),
-                        policyShortAccept: tr("policy.short.accept_edits"),
-                        policyShortSession: tr(
-                          "policy.short.allow_for_session",
-                        ),
-                        policyShortAuto: tr("policy.short.auto"),
-                        policyShortDontAsk: tr("policy.short.dont_ask"),
-                        policyShortYolo: tr("policy.short.always_approve"),
-                      }}
-                      onMode={(v) => {
-                        setMode(v);
-                        if (v === "plan") setGoalMode(false);
-                        void api
-                          .composerPrefsSet({
-                            projectId: activeProject?.id ?? null,
-                            sessionId: session.sessionId ?? null,
-                            mode: v,
-                          })
-                          .catch((e) => showToast(String(e), 4000));
-                      }}
-                      onPolicy={(v: PermissionPolicyId) => {
-                        applyPermissionPolicy(v);
-                      }}
+                      labels={composerAccessLabels}
+                      onMode={handleComposerModeChange}
+                      onPolicy={applyPermissionPolicy}
                     />
                     <ContextUsageChip
                       display={contextUsageDisplay}

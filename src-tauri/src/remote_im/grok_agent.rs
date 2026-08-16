@@ -42,12 +42,13 @@ pub fn resolve_remote_grok_home() -> PathBuf {
 }
 
 fn apply_agent_env(cmd: &mut Command) {
-    let grok_home = resolve_remote_grok_home();
+    let settings = crate::store::load_settings();
+    let grok_home = crate::paths::resolve_agent_grok_home(&settings.session_data_mode);
     let _ = std::fs::create_dir_all(&grok_home);
     cmd.env("GROK_HOME", &grok_home);
+    crate::agent_home_config::apply_compatibility_to_tokio_command(cmd, &settings);
     // Independent mode may need App-synced auth/providers (same as ACP spawn path).
-    let mode = crate::store::load_settings().session_data_mode;
-    if mode != "shared" {
+    if settings.session_data_mode != "shared" {
         crate::providers::prepare_route_auth_for_agent();
     }
     // GUI-spawned processes often lack ~/.grok/bin on PATH.

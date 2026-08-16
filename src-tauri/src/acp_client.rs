@@ -1467,14 +1467,10 @@ impl AcpClient {
         // model id `grok-4.5` to the DeepSeek base_url (400). Vision/search/X
         // go through Host prepare_agent_prompt + MCP official-aux instead.
         //
-        // Always disable Claude/Cursor MCP compat for App agent-home sessions.
-        // Grok merges ~/.claude.json / Cursor MCP by default; those hang for ~30s
-        // and pollute custom-main tool discovery. App injects only what it needs
-        // via session mcpServers (official-aux / Extensions). Opt back in with
-        // official_aux_with_user_mcp (Extensions MCPs), not Claude dump.
-        // Grok docs: GROK_CLAUDE_MCPS_ENABLED / GROK_CURSOR_MCPS_ENABLED.
-        cmd.env("GROK_CLAUDE_MCPS_ENABLED", "false");
-        cmd.env("GROK_CURSOR_MCPS_ENABLED", "false");
+        // Keep the app-owned compatibility choices process-local in shared mode
+        // (where the App must never rewrite ~/.grok/config.toml). Independent
+        // mode receives the same values through its agent-home profile as well.
+        crate::agent_home_config::apply_compatibility_to_tokio_command(&mut cmd, &settings);
         // Route agent traffic through the configured proxy (NEW-02). Windows
         // system proxy is registry-only and never reaches children as env vars.
         crate::proxy::apply_to_tokio_command(&mut cmd);

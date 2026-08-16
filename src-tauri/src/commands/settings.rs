@@ -1,3 +1,67 @@
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibilityPatch {
+    pub compat_claude_skills: Option<bool>,
+    pub compat_claude_mcps: Option<bool>,
+    pub compat_claude_agents: Option<bool>,
+    pub compat_claude_rules: Option<bool>,
+    pub compat_claude_hooks: Option<bool>,
+    pub compat_claude_sessions: Option<bool>,
+    pub compat_cursor_skills: Option<bool>,
+    pub compat_cursor_mcps: Option<bool>,
+    pub compat_cursor_agents: Option<bool>,
+    pub compat_cursor_rules: Option<bool>,
+    pub compat_cursor_hooks: Option<bool>,
+    pub compat_cursor_sessions: Option<bool>,
+    pub compat_codex_skills: Option<bool>,
+    pub compat_codex_mcps: Option<bool>,
+    pub compat_codex_agents: Option<bool>,
+    pub compat_codex_rules: Option<bool>,
+    pub compat_codex_hooks: Option<bool>,
+    pub compat_codex_sessions: Option<bool>,
+}
+
+impl CompatibilityPatch {
+    fn apply_to(self, settings: &mut AppSettings) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(value) = self.$field {
+                    settings.$field = value;
+                }
+            };
+        }
+        apply!(compat_claude_skills);
+        apply!(compat_claude_mcps);
+        apply!(compat_claude_agents);
+        apply!(compat_claude_rules);
+        apply!(compat_claude_hooks);
+        apply!(compat_claude_sessions);
+        apply!(compat_cursor_skills);
+        apply!(compat_cursor_mcps);
+        apply!(compat_cursor_agents);
+        apply!(compat_cursor_rules);
+        apply!(compat_cursor_hooks);
+        apply!(compat_cursor_sessions);
+        apply!(compat_codex_skills);
+        apply!(compat_codex_mcps);
+        apply!(compat_codex_agents);
+        apply!(compat_codex_rules);
+        apply!(compat_codex_hooks);
+        apply!(compat_codex_sessions);
+    }
+}
+
+#[tauri::command]
+pub async fn settings_patch_compatibility(
+    app: tauri::AppHandle,
+    mgr: State<'_, Arc<SessionManager>>,
+    patch: CompatibilityPatch,
+) -> Result<AppSettings, String> {
+    let mut settings = store::load_settings();
+    patch.apply_to(&mut settings);
+    settings_set(app, mgr, settings).await
+}
+
 #[tauri::command]
 pub async fn settings_get() -> Result<AppSettings, String> {
     Ok(store::load_settings())
@@ -117,8 +181,18 @@ pub async fn settings_set(
     let launch_at_login_flip = prev.launch_at_login != settings.launch_at_login;
     let schedules_launch_agent_flip =
         prev.schedules_launch_agent != settings.schedules_launch_agent;
+    let compatibility_flip = crate::store::compatibility_changed(&prev, &settings);
 
     store::save_settings(&settings)?;
+
+    if compatibility_flip {
+        if let Err(e) = crate::agent_home_config::sync_compatibility_to_agent_profile(
+            &settings.session_data_mode,
+            &settings,
+        ) {
+            tracing::warn!("settings_set sync compatibility profile: {e}");
+        }
+    }
 
     if schedules_launch_agent_flip {
         let res = if settings.schedules_launch_agent {
@@ -241,7 +315,8 @@ pub async fn settings_set(
         }
         need_soft_respawn = true;
     }
-    if web_search_flip
+    if compatibility_flip
+        || web_search_flip
         || official_aux_inject_flip
         || no_ask_user_flip
         || disallowed_tools_flip
